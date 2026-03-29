@@ -1,0 +1,45 @@
+{"event": "DRY RUN MODE \u2014 no changes will be submitted", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:16:58.808380Z"}
+{"date": "2026-03-20", "dry_run": true, "actions": ["era_upload", "write_off", "correct_and_resubmit"], "event": "Starting daily claims automation", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:16:58.808801Z"}
+{"event": "Step 1: ERA upload", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:16:58.808863Z"}
+{"count": 0, "event": "Starting ERA upload batch", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:16:58.808940Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809031Z"}
+{"event": "Downloading ERAs from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809158Z"}
+{"event": "DRY_RUN: Skipping live ERA download \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809192Z"}
+{"portal": "lauris", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "lauris", "timestamp": "2026-03-21T02:16:58.809234Z"}
+{"uploaded": 0, "skipped": 0, "event": "ERA upload complete", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:16:58.809291Z"}
+{"event": "Step 2: Fetching denied claims from Claim.MD", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:16:58.809320Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809351Z"}
+{"event": "Fetching denied/rejected claims from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809375Z"}
+{"event": "DRY_RUN: Skipping live claim fetch \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:16:58.809398Z"}
+{"event": "Retrieved 0 claims to process", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:16:58.809420Z"}
+{"text": "Automated run 03/20/26. ERAs uploaded: 0. Started with 0 outstanding claims. Completed: 0 (0 correct", "event": "DRY_RUN: Would post ClickUp comment", "level": "info", "logger": "clickup_logger", "timestamp": "2026-03-21T02:16:58.809464Z"}
+{"event": "DRY RUN MODE \u2014 no changes will be submitted", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:21.263221Z"}
+{"date": "2026-03-20", "dry_run": true, "actions": ["era_upload", "write_off", "correct_and_resubmit"], "event": "Starting daily claims automation", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:21.264004Z"}
+{"event": "Step 1: ERA upload", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:21.264085Z"}
+{"count": 0, "event": "Starting ERA upload batch", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:47:21.264131Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264207Z"}
+{"event": "Downloading ERAs from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264272Z"}
+{"event": "DRY_RUN: Skipping live ERA download \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264306Z"}
+{"portal": "lauris", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "lauris", "timestamp": "2026-03-21T02:47:21.264348Z"}
+{"uploaded": 0, "skipped": 0, "event": "ERA upload complete", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:47:21.264438Z"}
+{"event": "Step 2: Fetching denied claims from Claim.MD", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:21.264493Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264541Z"}
+{"event": "Fetching denied/rejected claims from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264574Z"}
+{"event": "DRY_RUN: Skipping live claim fetch \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:21.264607Z"}
+{"event": "Retrieved 0 claims to process", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:21.264633Z"}
+{"text": "Automated run 03/20/26. ERAs uploaded: 0. Started with 0 outstanding claims. Completed: 0 (0 correct", "event": "DRY_RUN: Would post ClickUp comment", "level": "info", "logger": "clickup_logger", "timestamp": "2026-03-21T02:47:21.264684Z"}
+{"event": "DRY RUN MODE \u2014 no changes will be submitted", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:35.046349Z"}
+{"date": "2026-03-20", "dry_run": true, "actions": ["era_upload", "write_off", "correct_and_resubmit"], "event": "Starting daily claims automation", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:35.046694Z"}
+{"event": "Step 1: ERA upload", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:35.046753Z"}
+{"count": 0, "event": "Starting ERA upload batch", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:47:35.046794Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.046863Z"}
+{"event": "Downloading ERAs from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.046929Z"}
+{"event": "DRY_RUN: Skipping live ERA download \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.046960Z"}
+{"portal": "lauris", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "lauris", "timestamp": "2026-03-21T02:47:35.046997Z"}
+{"uploaded": 0, "skipped": 0, "event": "ERA upload complete", "level": "info", "logger": "action_handlers", "timestamp": "2026-03-21T02:47:35.047034Z"}
+{"event": "Step 2: Fetching denied claims from Claim.MD", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:35.047061Z"}
+{"portal": "claimmd", "event": "DRY_RUN: Skipping browser launch", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.047094Z"}
+{"event": "Fetching denied/rejected claims from Claim.MD", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.047119Z"}
+{"event": "DRY_RUN: Skipping live claim fetch \u2014 returning empty list", "level": "info", "logger": "claimmd", "timestamp": "2026-03-21T02:47:35.047142Z"}
+{"event": "Retrieved 0 claims to process", "level": "info", "logger": "orchestrator", "timestamp": "2026-03-21T02:47:35.047165Z"}
+{"text": "Automated run 03/20/26. ERAs uploaded: 0. Started with 0 outstanding claims. Completed: 0 (0 correct", "event": "DRY_RUN: Would post ClickUp comment", "level": "info", "logger": "clickup_logger", "timestamp": "2026-03-21T02:47:35.047208Z"}

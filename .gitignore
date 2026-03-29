@@ -1,0 +1,38 @@
+# Credentials — NEVER commit
+.env
+*.env
+.env.*
+
+# Sessions and cookies
+sessions/
+*.json.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Data files (contain PHI/PII)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/era_status.json
+data/last_responseid.txt
+
+# Downloaded files
+/tmp/
+logs/screenshots/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+~.xlsx

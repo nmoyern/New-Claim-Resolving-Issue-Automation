@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows Task Scheduler definition for LCI Claims Automation.
+
+  Import via:
+    schtasks /create /xml "LCI_Claims_Daily.xml" /tn "LCI Claims Automation"
+
+  Or via GUI:
+    Task Scheduler → Import Task → select this file
+
+  Runs Monday-Friday at 7:00 AM. Adjust paths for your installation.
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>2026-03-20T00:00:00</Date>
+    <Author>Life Consultants Inc.</Author>
+    <Description>LCI Claims Automation — daily claims follow-up, ERA upload, Claim.MD processing</Description>
+    <URI>\LCI\Claims Automation</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- Monday -->
+    <CalendarTrigger>
+      <StartBoundary>2026-03-23T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek><Monday/></DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+    <!-- Tuesday -->
+    <CalendarTrigger>
+      <StartBoundary>2026-03-24T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek><Tuesday/></DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+    <!-- Wednesday -->
+    <CalendarTrigger>
+      <StartBoundary>2026-03-25T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek><Wednesday/></DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+    <!-- Thursday -->
+    <CalendarTrigger>
+      <StartBoundary>2026-03-26T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek><Thursday/></DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+    <!-- Friday -->
+    <CalendarTrigger>
+      <StartBoundary>2026-03-27T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek><Friday/></DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <!-- CHANGE THIS to the Windows user that runs the automation -->
+      <UserId>LCI\claims_bot</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <!-- CHANGE PATH to your Python installation and project location -->
+      <Command>C:\Python311\python.exe</Command>
+      <Arguments>C:\claims_automation\orchestrator.py</Arguments>
+      <WorkingDirectory>C:\claims_automation</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

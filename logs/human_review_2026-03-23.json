@@ -1,0 +1,434 @@
+[
+  {
+    "claim_id": "721877709",
+    "client_name": "CW4178-1178904",
+    "mco": "united",
+    "dos": "2025-10-22",
+    "action": "human_review",
+    "reason": "Routed to human review by decision tree",
+    "timestamp": "2026-03-23T07:20:58.947268"
+  },
+  {
+    "claim_id": "721877559",
+    "client_name": "CW4178-1178902",
+    "mco": "united",
+    "dos": "2025-10-20",
+    "action": "human_review",
+    "reason": "Coverage terminated denial. Eligibility check performed. Available units reduced to 0. Human must verify: did insurance change? If yes, notify life coach/supervisor via ClickUp and request new SRA. Re-assessment must be completed. Individual has 0 available units.",
+    "timestamp": "2026-03-23T07:21:13.136139"
+  },
+  {
+    "claim_id": "721877563",
+    "client_name": "CW4178-1178903",
+    "mco": "united",
+    "dos": "2025-10-21",
+    "action": "human_review",
+    "reason": "Coverage terminated denial. Eligibility check performed. Available units reduced to 0. Human must verify: did insurance change? If yes, notify life coach/supervisor via ClickUp and request new SRA. Re-assessment must be completed. Individual has 0 available units.",
+    "timestamp": "2026-03-23T07:21:27.394056"
+  },
+  {
+    "claim_id": "721878309",
+    "client_name": "CW4178-1176811",
+    "mco": "sentara",
+    "dos": "2025-10-20",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1176811 around DOS 2025-10-20. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:22:10.727797"
+  },
+  {
+    "claim_id": "721878312",
+    "client_name": "CW4178-1179243",
+    "mco": "sentara",
+    "dos": "2025-10-23",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1179243 around DOS 2025-10-23. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:22:53.542053"
+  },
+  {
+    "claim_id": "721878178",
+    "client_name": "CW4178-1181497",
+    "mco": "sentara",
+    "dos": "2025-10-26",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1181497 around DOS 2025-10-26. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:23:35.909669"
+  },
+  {
+    "claim_id": "721878210",
+    "client_name": "CW4178-1181491",
+    "mco": "sentara",
+    "dos": "2025-10-25",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1181491 around DOS 2025-10-25. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:24:18.694338"
+  },
+  {
+    "claim_id": "721878214",
+    "client_name": "CW4178-1179764",
+    "mco": "sentara",
+    "dos": "2025-10-23",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1179764 around DOS 2025-10-23. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:25:01.000817"
+  },
+  {
+    "claim_id": "721878149",
+    "client_name": "CW4178-1182860",
+    "mco": "sentara",
+    "dos": "2025-10-27",
+    "action": "lauris_fax_verify",
+    "reason": "No fax record found for CW4178-1182860 around DOS 2025-10-27. Auth never submitted. ClickUp task created (due 1 business day).",
+    "timestamp": "2026-03-23T07:25:43.789306"
+  },
+  {
+    "claim_id": "726961214",
+    "client_name": "CW4193-1182364",
+    "mco": "united",
+    "dos": "2025-10-27",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:46.206449"
+  },
+  {
+    "claim_id": "726961215",
+    "client_name": "CW4193-1184042",
+    "mco": "united",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:48.605878"
+  },
+  {
+    "claim_id": "726961221",
+    "client_name": "CW4193-1185543",
+    "mco": "united",
+    "dos": "2025-10-31",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:50.854815"
+  },
+  {
+    "claim_id": "726961222",
+    "client_name": "CW4193-1187423",
+    "mco": "united",
+    "dos": "2025-10-31",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:53.126952"
+  },
+  {
+    "claim_id": "726961230",
+    "client_name": "CW4193-1189071",
+    "mco": "united",
+    "dos": "2025-11-04",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:57.349470"
+  },
+  {
+    "claim_id": "726961279",
+    "client_name": "CW4193-1188030",
+    "mco": "united",
+    "dos": "2025-11-03",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:25:59.762847"
+  },
+  {
+    "claim_id": "726961282",
+    "client_name": "CW4193-1185228",
+    "mco": "united",
+    "dos": "2025-10-30",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:01.920109"
+  },
+  {
+    "claim_id": "726961309",
+    "client_name": "CW4193-1184030",
+    "mco": "united",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:04.064280"
+  },
+  {
+    "claim_id": "726961363",
+    "client_name": "CW4193-1185364",
+    "mco": "sentara",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:08.771836"
+  },
+  {
+    "claim_id": "726961364",
+    "client_name": "CW4193-1183889",
+    "mco": "sentara",
+    "dos": "2025-10-28",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:11.023149"
+  },
+  {
+    "claim_id": "726961397",
+    "client_name": "CW4193-1112706",
+    "mco": "sentara",
+    "dos": "2025-07-25",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:13.142401"
+  },
+  {
+    "claim_id": "726961403",
+    "client_name": "CW4193-1185375",
+    "mco": "sentara",
+    "dos": "2025-10-30",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:15.327451"
+  },
+  {
+    "claim_id": "726961406",
+    "client_name": "CW4193-1187293",
+    "mco": "sentara",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:17.481955"
+  },
+  {
+    "claim_id": "726961416",
+    "client_name": "CW4193-1031754",
+    "mco": "sentara",
+    "dos": "2025-04-01",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:19.655260"
+  },
+  {
+    "claim_id": "726961419",
+    "client_name": "CW4193-1032251",
+    "mco": "sentara",
+    "dos": "2025-04-02",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:22.050835"
+  },
+  {
+    "claim_id": "726961424",
+    "client_name": "CW4193-1184948",
+    "mco": "sentara",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:24.238449"
+  },
+  {
+    "claim_id": "726961426",
+    "client_name": "CW4193-1187709",
+    "mco": "sentara",
+    "dos": "2025-11-03",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:27.160753"
+  },
+  {
+    "claim_id": "726961434",
+    "client_name": "CW4193-1064243",
+    "mco": "sentara",
+    "dos": "2025-05-19",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:29.356831"
+  },
+  {
+    "claim_id": "726961441",
+    "client_name": "CW4193-1183782",
+    "mco": "sentara",
+    "dos": "2025-10-26",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:31.422558"
+  },
+  {
+    "claim_id": "726961450",
+    "client_name": "CW4193-1168016",
+    "mco": "sentara",
+    "dos": "2025-10-08",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:33.558948"
+  },
+  {
+    "claim_id": "726961453",
+    "client_name": "CW4193-1188354",
+    "mco": "sentara",
+    "dos": "2025-11-03",
+    "action": "correct_and_resubmit",
+    "reason": "Could not determine what to correct \u2014 denial code unclear",
+    "timestamp": "2026-03-23T07:26:35.064114"
+  },
+  {
+    "claim_id": "726961457",
+    "client_name": "CW4193-1185488",
+    "mco": "sentara",
+    "dos": "2025-10-30",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:37.241974"
+  },
+  {
+    "claim_id": "726961463",
+    "client_name": "CW4193-1187176",
+    "mco": "sentara",
+    "dos": "2025-11-02",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:39.495216"
+  },
+  {
+    "claim_id": "726961483",
+    "client_name": "CW4193-1187170",
+    "mco": "sentara",
+    "dos": "2025-11-01",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:42.055442"
+  },
+  {
+    "claim_id": "726961484",
+    "client_name": "CW4193-1185382",
+    "mco": "sentara",
+    "dos": "2025-10-30",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:44.113481"
+  },
+  {
+    "claim_id": "726961502",
+    "client_name": "CW4193-1185588",
+    "mco": "sentara",
+    "dos": "2025-10-31",
+    "action": "correct_and_resubmit",
+    "reason": "Could not determine what to correct \u2014 denial code unclear",
+    "timestamp": "2026-03-23T07:26:45.618985"
+  },
+  {
+    "claim_id": "726961504",
+    "client_name": "CW4193-1185244",
+    "mco": "sentara",
+    "dos": "2025-10-30",
+    "action": "correct_and_resubmit",
+    "reason": "Could not determine what to correct \u2014 denial code unclear",
+    "timestamp": "2026-03-23T07:26:47.129328"
+  },
+  {
+    "claim_id": "726961506",
+    "client_name": "CW4193-1183684",
+    "mco": "sentara",
+    "dos": "2025-10-28",
+    "action": "correct_and_resubmit",
+    "reason": "Could not determine what to correct \u2014 denial code unclear",
+    "timestamp": "2026-03-23T07:26:48.633051"
+  },
+  {
+    "claim_id": "726961609",
+    "client_name": "CW4193-1184874",
+    "mco": "sentara",
+    "dos": "2025-10-29",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:51.681699"
+  },
+  {
+    "claim_id": "726961610",
+    "client_name": "CW4193-1183566",
+    "mco": "sentara",
+    "dos": "2025-10-28",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:54.396444"
+  },
+  {
+    "claim_id": "726961611",
+    "client_name": "CW4193-1182132",
+    "mco": "sentara",
+    "dos": "2025-10-27",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:56.581350"
+  },
+  {
+    "claim_id": "726961613",
+    "client_name": "CW4193-1184930",
+    "mco": "sentara",
+    "dos": "2025-10-26",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:26:58.741785"
+  },
+  {
+    "claim_id": "726961616",
+    "client_name": "CW4193-1031715",
+    "mco": "sentara",
+    "dos": "2025-03-31",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:00.891509"
+  },
+  {
+    "claim_id": "726961617",
+    "client_name": "CW4193-1039560",
+    "mco": "sentara",
+    "dos": "2025-04-11",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:03.145966"
+  },
+  {
+    "claim_id": "726961618",
+    "client_name": "CW4193-1038220",
+    "mco": "sentara",
+    "dos": "2025-04-10",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:06.749185"
+  },
+  {
+    "claim_id": "726961619",
+    "client_name": "CW4193-1038032",
+    "mco": "sentara",
+    "dos": "2025-04-09",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:08.982124"
+  },
+  {
+    "claim_id": "726961620",
+    "client_name": "CW4193-1037818",
+    "mco": "sentara",
+    "dos": "2025-04-08",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:11.240192"
+  },
+  {
+    "claim_id": "726961621",
+    "client_name": "CW4193-1037779",
+    "mco": "sentara",
+    "dos": "2025-04-07",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:13.284155"
+  },
+  {
+    "claim_id": "726961622",
+    "client_name": "CW4193-1034335",
+    "mco": "sentara",
+    "dos": "2025-04-04",
+    "action": "correct_and_resubmit",
+    "reason": "Diagnosis code is blank. ClickUp task created. Cannot submit claim until diagnosis is provided.",
+    "timestamp": "2026-03-23T07:27:15.433998"
+  }
+]
