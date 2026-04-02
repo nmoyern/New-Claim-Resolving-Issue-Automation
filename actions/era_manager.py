@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -31,6 +32,146 @@ from logging_utils.logger import get_logger, ClickUpLogger
 
 logger = get_logger("era_manager")
 clickup = ClickUpLogger()
+
+
+def _strip_plb_from_835(file_path: str) -> list[dict]:
+    """
+    Strip PLB (Provider Level Balance) segments from an 835 file and fix
+    the BPR total to match the sum of CLP payments. PLB segments contain
+    ACH fees that cause Lauris to silently reject the ERA posting.
+
+    Returns a list of PLB adjustments found (each a dict with
+    npi, reason_code, check_number, amount).
+    """
+    try:
+        content = Path(file_path).read_text()
+    except Exception:
+        return []
+
+    segments = content.split("~")
+    clean_segments = []
+    plb_adjustments = []
+    total_plb_amount = 0.0
+
+    for seg in segments:
+        seg_stripped = seg.strip()
+        if seg_stripped.startswith("PLB"):
+            fields = seg_stripped.split("*")
+            if len(fields) >= 5:
+                npi = fields[1]
+                reason_ref = fields[3]
+                try:
+                    amount = abs(float(fields[4]))
+                except ValueError:
+                    amount = 0.0
+                reason_code = reason_ref.split(":")[0] if ":" in reason_ref else reason_ref
+                check_ref = reason_ref.split(":")[1] if ":" in reason_ref else ""
+                plb_adjustments.append({
+                    "npi": npi,
+                    "reason_code": reason_code,
+                    "check_number": check_ref,
+                    "amount": amount,
+                })
+                total_plb_amount += amount
+                logger.info(
+                    "Stripped PLB segment from 835",
+                    file=file_path,
+                    amount=amount,
+                    check=check_ref,
+                )
+            continue
+        clean_segments.append(seg)
+
+    if not plb_adjustments:
+        return []
+
+    # Fix BPR total: add back the PLB amount so BPR matches CLP totals
+    clean_content = "~".join(clean_segments)
+    bpr_match = re.search(r"(BPR\*[A-Z]\*)([0-9.]+)(\*)", clean_content)
+    if bpr_match:
+        old_total = float(bpr_match.group(2))
+        new_total = old_total + total_plb_amount
+        clean_content = clean_content.replace(
+            bpr_match.group(0),
+            f"{bpr_match.group(1)}{new_total:.2f}{bpr_match.group(3)}",
+            1,
+        )
+        logger.info(
+            "Fixed BPR total in 835",
+            old=f"${old_total:.2f}",
+            new=f"${new_total:.2f}",
+        )
+
+    Path(file_path).write_text(clean_content)
+    return plb_adjustments
+
+
+async def _create_plb_writeoff_task(
+    plb_adjustments: list[dict],
+    era_id: str,
+    mco_name: str,
+    program_name: str,
+) -> None:
+    """Create a ClickUp task assigned to Desiree for PLB write-off."""
+    from actions.clickup_tasks import (
+        ClickUpTaskCreator,
+        MEMBER_DESIREE,
+        PRIORITY_HIGH,
+        _next_business_day,
+    )
+
+    tc = ClickUpTaskCreator()
+
+    total_plb = sum(a["amount"] for a in plb_adjustments)
+    detail_lines = []
+    for adj in plb_adjustments:
+        detail_lines.append(
+            f"  - ${adj['amount']:.2f} (check {adj['check_number']}, "
+            f"reason {adj['reason_code']}, NPI {adj['npi']})"
+        )
+    detail_text = "\n".join(detail_lines)
+
+    due = _next_business_day()
+
+    task_name = (
+        f"Write off PLB fee ${total_plb:.2f} - "
+        f"{mco_name} ERA {era_id}"
+    )
+    description = (
+        f"ERA {era_id} ({mco_name}, {program_name}) contained a "
+        f"Provider Level Balance (PLB) adjustment of ${total_plb:.2f}.\n\n"
+        f"The PLB segment was automatically stripped from the 835 file "
+        f"so Lauris could process the ERA. The following amount(s) need "
+        f"to be written off in Lauris Billing Center:\n\n"
+        f"{detail_text}\n\n"
+        f"Total to write off: ${total_plb:.2f}\n\n"
+        f"This is typically an ACH fee deducted by the MCO from the "
+        f"payment deposit.\n\n"
+        f"#AUTO #{date.today().strftime('%m/%d/%y')}"
+    )
+
+    task_id = await tc.create_task(
+        list_id=tc.list_id,
+        name=task_name,
+        description=description,
+        assignees=[MEMBER_DESIREE],
+        due_date=due,
+        priority=PRIORITY_HIGH,
+    )
+
+    if task_id:
+        logger.info(
+            "PLB write-off ClickUp task created",
+            task_id=task_id,
+            era_id=era_id,
+            amount=total_plb,
+            due=str(due.date()),
+        )
+    else:
+        logger.error(
+            "Failed to create PLB write-off ClickUp task",
+            era_id=era_id,
+        )
 
 # Where to stage ERA files for manual Lauris upload
 ERA_STAGING_DIR = Path(os.path.expanduser(
@@ -83,6 +224,7 @@ async def download_and_stage_eras() -> dict:
     downloaded = 0
     staged = 0
     irregular_count = 0
+    plb_stripped = 0
     already = 0
     irregular_list = []
     staged_list = []
@@ -139,6 +281,24 @@ async def download_and_stage_eras() -> dict:
             logger.info("Irregular ERA flagged", era_id=era_id, type=era_type)
             continue
 
+        # Strip PLB segments (ACH fees) before the file reaches Lauris.
+        # PLB causes Lauris to silently reject ERA posting due to amount mismatch.
+        # Creates a ClickUp task for Desiree to write off the amount.
+        plb_adjustments = _strip_plb_from_835(save_path)
+        if plb_adjustments:
+            total_plb = sum(a["amount"] for a in plb_adjustments)
+            logger.info(
+                "PLB stripped from ERA",
+                era_id=era_id,
+                plb_count=len(plb_adjustments),
+                total=f"${total_plb:.2f}",
+            )
+            await _create_plb_writeoff_task(
+                plb_adjustments, era_id,
+                mco.value, program.value,
+            )
+            plb_stripped += 1
+
         # Stage for manual Lauris upload
         if not DRY_RUN:
             staged_dir = ERA_STAGING_DIR / date.today().strftime("%Y-%m-%d")
@@ -178,6 +338,7 @@ async def download_and_stage_eras() -> dict:
         "downloaded": downloaded,
         "staged": staged,
         "irregular": irregular_count,
+        "plb_stripped": plb_stripped,
         "already_processed": already,
     }
     logger.info("ERA staging complete", **result)
