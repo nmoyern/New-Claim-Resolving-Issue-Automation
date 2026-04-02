@@ -8,6 +8,7 @@ Called by the orchestrator with a Claim and the determined action.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import date
 from pathlib import Path
@@ -136,6 +137,29 @@ MCO_AUTH_FAX_NUMBERS = {
 }
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+# Persistent log of ERA IDs successfully uploaded to Lauris.
+# Prevents re-uploading if the script re-runs after a partial failure,
+# since Claim.MD's new_only flag only tracks downloads, not Lauris uploads.
+ERA_UPLOAD_LOG = Path("data/era_upload_log.json")
+
+
+def _load_uploaded_era_ids() -> set:
+    """Return the set of ERA IDs already uploaded to Lauris."""
+    ERA_UPLOAD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    if ERA_UPLOAD_LOG.exists():
+        try:
+            return set(json.loads(ERA_UPLOAD_LOG.read_text()))
+        except Exception:
+            return set()
+    return set()
+
+
+def _record_uploaded_era_id(era_id: str) -> None:
+    """Append an ERA ID to the persistent upload log."""
+    ids = _load_uploaded_era_ids()
+    ids.add(era_id)
+    ERA_UPLOAD_LOG.write_text(json.dumps(sorted(ids), indent=2))
+
 
 # ---------------------------------------------------------------------------
 # ERA Upload Handler
@@ -145,16 +169,21 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
     """
     Download ERAs from Claim.MD (via API) and upload to Lauris.
     Skips irregular ERAs (Anthem Mary's, etc.) and flags them.
+    Skips ERAs already recorded in data/era_upload_log.json so that
+    re-runs never double-upload to Lauris.
     """
     from config.models import Program
-    from lauris.billing import classify_era
+    from lauris.billing import classify_era, LaurisSession
 
     logger.info("Starting ERA upload batch", count=len(eras))
     downloaded = 0
     uploaded = 0
     skipped_irregular = 0
+    skipped_duplicate = 0
     era_dir = WORK_DIR / "eras"
     era_dir.mkdir(parents=True, exist_ok=True)
+
+    already_uploaded = _load_uploaded_era_ids()
 
     # Step 1: Get ERA list from Claim.MD API
     api = ClaimMDAPI()
@@ -167,6 +196,12 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
         for era_info in era_list:
             era_id = str(era_info.get("eraid", ""))
             if not era_id:
+                continue
+
+            # Skip if already uploaded to Lauris in a previous run
+            if era_id in already_uploaded:
+                skipped_duplicate += 1
+                logger.info("Skipping already-uploaded ERA", era_id=era_id)
                 continue
 
             payer = era_info.get("payer_name", "")
@@ -208,8 +243,8 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
 
             # Download 835 file via API
             save_path = str(era_dir / f"era_{era_id}.835")
-            content = await api.download_era_835(era_id, save_path)
-            if content:
+            dl_content = await api.download_era_835(era_id, save_path)
+            if dl_content:
                 era_obj.file_path = save_path
                 era_objects.append(era_obj)
                 downloaded += 1
@@ -219,16 +254,21 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
             files = await claimmd.download_eras(str(era_dir))
             downloaded = len(files)
 
-    # Step 2: ERA files are downloaded and saved to disk.
-    # Lauris ERA upload requires the desktop billing center (not web portal).
-    # The downloaded 835 files are ready for manual upload.
+    # Step 2: Upload each downloaded ERA to Lauris.
+    # On success, record the ERA ID so it is never re-uploaded.
+    # On failure, leave it unrecorded so the next run retries.
     if era_objects:
-        uploaded = 0  # Manual upload needed
-        logger.info(
-            "ERA files downloaded and ready for Lauris upload",
-            count=len(era_objects),
-            path=str(era_dir),
-        )
+        async with LaurisSession() as lauris:
+            for era_obj in era_objects:
+                ok = await lauris.upload_era(era_obj)
+                if ok:
+                    _record_uploaded_era_id(era_obj.era_id)
+                    uploaded += 1
+                else:
+                    logger.warning(
+                        "ERA upload to Lauris failed — will retry next run",
+                        era_id=era_obj.era_id,
+                    )
 
     result = ResolutionResult(
         claim=Claim(
@@ -236,16 +276,18 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
             MCO.UNKNOWN, Program.UNKNOWN, 0,
         ),
         action_taken=ResolutionAction.ERA_UPLOAD,
-        success=downloaded > 0,
+        success=uploaded > 0 or downloaded == 0,
         note_written=(
             f"Downloaded {downloaded} ERAs. "
             f"Uploaded {uploaded} to Lauris. "
-            f"Skipped {skipped_irregular} irregular."
+            f"Skipped {skipped_irregular} irregular. "
+            f"Skipped {skipped_duplicate} already uploaded."
         ),
     )
     logger.info("ERA upload complete",
                 downloaded=downloaded, uploaded=uploaded,
-                skipped=skipped_irregular)
+                skipped_irregular=skipped_irregular,
+                skipped_duplicate=skipped_duplicate)
     return result
 
 
