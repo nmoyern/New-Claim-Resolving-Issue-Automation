@@ -329,31 +329,65 @@ async def post_pending_eras() -> dict:
             # Post each file
             for file_val, file_name in files_to_post:
                 try:
-                    # Select the file from dropdown
+                    # Step 1: Select the file from dropdown
                     await lauris.page.select_option(
                         "select[name='ddlEDIFiles']", value=file_val
                     )
                     await asyncio.sleep(0.5)
 
-                    # Click "Post Selected File"
+                    # Step 2: Click "Post Selected File" to load items into grid
                     await lauris.page.click(
                         "input[name='btnPostFile']", timeout=10000
                     )
                     await asyncio.sleep(3)
 
-                    # Verify success/error after posting
+                    # Step 3: Check all checkboxes in the results grid
+                    checkboxes = await lauris.page.query_selector_all(
+                        "table input[type='checkbox'], "
+                        "input[type='checkbox'][name*='chk'], "
+                        "input[type='checkbox'][name*='Check'], "
+                        "input[type='checkbox'][name*='select']"
+                    )
+                    checked_count = 0
+                    for cb in checkboxes:
+                        try:
+                            if await cb.is_visible():
+                                await cb.check()
+                                checked_count += 1
+                        except Exception:
+                            pass
+                    logger.info("Checked grid items",
+                                file=file_name, items=checked_count)
+
+                    # Step 4: Click the "Post" button at the bottom to
+                    # actually send items to billing
+                    post_btn = await lauris.page.query_selector(
+                        "input[name='btnPost'], input[value='Post'], "
+                        "button:has-text('Post')"
+                    )
+                    if post_btn and await post_btn.is_visible():
+                        await post_btn.click()
+                        await asyncio.sleep(5)
+                        logger.info("Clicked Post button", file=file_name)
+                    else:
+                        logger.warning(
+                            "Post button not found — ERA may not be posted",
+                            file=file_name,
+                        )
+
+                    # Step 5: Verify success/error
                     page_text = await lauris.page.inner_text("body")
                     posting_error = False
                     for error_indicator in [
                         "error", "failed", "unable to post",
                         "exception", "could not process",
+                        "out of balance", "mismatch",
                     ]:
                         if error_indicator in page_text.lower():
                             posting_error = True
                             break
 
                     if posting_error:
-                        # Take screenshot for debugging
                         try:
                             screenshot_path = f"/tmp/claims_work/era_post_error_{file_val}.png"
                             await lauris.page.screenshot(path=screenshot_path)
@@ -366,7 +400,22 @@ async def post_pending_eras() -> dict:
                             logger.error("ERA posting error detected",
                                          file=file_name)
                         result["errors"] += 1
+                        # Navigate back to EDI Results for next file
+                        await lauris.page.goto(
+                            f"{base}/{EDI_RESULTS_PATH}",
+                            wait_until="domcontentloaded",
+                            timeout=20000,
+                        )
+                        await asyncio.sleep(3)
                         continue
+
+                    # Navigate back to EDI Results for next file
+                    await lauris.page.goto(
+                        f"{base}/{EDI_RESULTS_PATH}",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    await asyncio.sleep(3)
 
                     result["posted"] += 1
                     result["posted_files"].append(file_name)
