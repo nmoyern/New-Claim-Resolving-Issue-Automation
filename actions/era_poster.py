@@ -220,6 +220,14 @@ async def _write_off_plb_adjustment(
         check=adj["check_number"],
     )
 
+    # Navigate back to EDI Results page so subsequent ERA postings work
+    await lauris.page.goto(
+        f"{base_url}/{EDI_RESULTS_PATH}",
+        wait_until="domcontentloaded",
+        timeout=20000,
+    )
+    await asyncio.sleep(3)
+
 
 async def post_pending_eras() -> dict:
     """
