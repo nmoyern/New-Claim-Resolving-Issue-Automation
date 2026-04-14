@@ -3,15 +3,23 @@ actions/era_poster.py
 ---------------------
 Automated ERA posting via Lauris EDI Results web page.
 
-ERA/835 files are automatically received by Lauris as EDI files
-(visible in AR Reports > EDI Items). This module:
-  1. Lists unposted EDI files
-  2. Classifies each (skip irregular: Anthem Mary's, etc.)
-  3. Posts standard ERAs by selecting from dropdown + clicking "Post Selected File"
-  4. Logs results
+Flow per file (verified 2026-04-14):
+  1. Select the file in the ddlEDIFiles dropdown
+  2. Click "Post Selected File" — fires a native confirm() dialog
+  3. Auto-accept the dialog (Playwright default would dismiss)
+  4. Lauris navigates to AREntry.aspx?id=edi<N>&edircvd=<amount>&edifid=<id>
+  5. Verify the URL's edircvd= matches the 835's BPR02 (amount mismatch
+     means Claim.MD and Lauris have different copies of the file — skip)
+  6. Fill Deposit Date (MM/DD/YYYY), Period (YYYYMM), Check Number (TRN02)
+  7. Click btnStart "Post Payments" to actually commit
+  8. Navigate back to EDI Results and verify the file_val is gone from the
+     dropdown — this is the only reliable success signal
+  9. Parse the 835 for PLB (Provider Level Balance) segments and either:
+     - auto-write-off amounts <= $25 (typically ACH fees) in Lauris, or
+     - flag larger amounts for human review via ClickUp
 
 The EDI Results page is at: /ar/ClosedBillingEDIResults.aspx
-Files are named: era_{payerid}_{eraid}.x12
+Files are named: era_{payerid}_{eraid}.x12 (- MM/DD/YYYY)
 """
 from __future__ import annotations
 
@@ -25,6 +33,7 @@ from typing import List, Tuple
 from config.settings import DRY_RUN
 from lauris.billing import LaurisSession
 from logging_utils.logger import get_logger, ClickUpLogger
+from sources.claimmd_api import ClaimMDAPI
 
 logger = get_logger("era_poster")
 clickup = ClickUpLogger()
@@ -32,11 +41,19 @@ clickup = ClickUpLogger()
 # Track which ERA files have been posted to Lauris (persistent)
 POSTED_ERAS_FILE = Path("data/posted_eras.json")
 
+# Explicit "do not attempt to post" list — files known to silently fail because
+# Lauris's clearinghouse has different 835 content than Claim.MD, plus phantom
+# -1 duplicates that Lauris redelivers after every successful post. Populated
+# from the 2026-04-14 debugging session. Skipping these avoids wasted retries
+# and false ClickUp failure tasks.
+UNPOSTABLE_ERAS_FILE = Path("data/unpostable_eras.json")
+
 # PLB adjustments (ACH fees, etc.) at or below this amount are auto-written-off.
 # Anything above this threshold is flagged for human review.
 PLB_AUTO_WRITEOFF_MAX = 25.00
 
-# Directory where downloaded 835 files are stored
+# Directory where downloaded 835 files are cached (populated by era_manager.py
+# when it downloads from Claim.MD). PLB parsing reads from here.
 ERA_DOWNLOAD_DIR = Path("/tmp/claims_work/eras")
 
 
@@ -58,13 +75,77 @@ def _save_posted_eras(posted: set):
         json.dump(sorted(posted), f)
 
 
+def _load_unpostable_eras() -> dict:
+    """Load the {file_val: reason} map of ERA files to skip entirely."""
+    if not UNPOSTABLE_ERAS_FILE.exists():
+        return {}
+    try:
+        with open(UNPOSTABLE_ERAS_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    out = {}
+    for entry in data.get("ignored", []):
+        fv = entry.get("file_val", "")
+        if fv:
+            out[fv] = entry.get("reason", "") or entry.get("category", "unpostable")
+    return out
+
+
+def _parse_era_id_from_filename(fname: str) -> str:
+    """'era_54154_71905665.x12 - 03/25/2026' -> '71905665'.
+
+    Also handles 'era_71905665.x12' (no payer prefix, used for Claim.MD-staged
+    files in ERA_DOWNLOAD_DIR)."""
+    m = re.search(r"era[_-](?:[A-Za-z0-9]+_)?(\d+)", fname)
+    return m.group(1) if m else ""
+
+
+# Backwards-compat alias — some PLB code paths use the older name
+_extract_era_id_from_filename = _parse_era_id_from_filename
+
+
+def _parse_835_metadata(content: str) -> dict:
+    """Extract BPR16 (check/EFT date CCYYMMDD), BPR02 (total), TRN02 (trace)."""
+    out = {"bpr16": "", "trn02": "", "bpr02": ""}
+    for seg in content.split("~"):
+        parts = seg.strip().split("*")
+        if not parts:
+            continue
+        if parts[0] == "BPR":
+            if len(parts) >= 17:
+                out["bpr16"] = parts[16].strip()
+            if len(parts) >= 3:
+                out["bpr02"] = parts[2].strip()
+        elif parts[0] == "TRN" and len(parts) >= 3 and not out["trn02"]:
+            out["trn02"] = parts[2].strip()
+    return out
+
+
+def _ccyymmdd_to_mmddyyyy(s: str) -> str:
+    """20260325 -> 03/25/2026"""
+    s = (s or "").strip()
+    if len(s) != 8 or not s.isdigit():
+        return ""
+    return f"{s[4:6]}/{s[6:8]}/{s[:4]}"
+
+
+def _ccyymmdd_to_yyyymm(s: str) -> str:
+    """20260325 -> 202603 (Lauris period format, not MM/YYYY)"""
+    s = (s or "").strip()
+    if len(s) != 8 or not s.isdigit():
+        return ""
+    return f"{s[:4]}{s[4:6]}"
+
+
 def _parse_plb_adjustments(era_id: str) -> list[dict]:
     """
     Parse PLB (Provider Level Balance) segments from a downloaded 835 file.
     Returns a list of dicts: {check_number, amount, reason_code, npi}.
 
-    PLB format: PLB*npi*date*reason_code:reference*amount
+    PLB format: PLB*npi*fiscal_year_end*reason_code:reference*amount
     Common in ERAs where the MCO deducts an ACH fee from the payment.
+    Reads from ERA_DOWNLOAD_DIR (populated by era_manager.download_and_stage_eras).
     """
     # Try to find the 835 file — match by era_id suffix in filename
     matches = list(ERA_DOWNLOAD_DIR.glob(f"era_{era_id}.835"))
@@ -80,14 +161,11 @@ def _parse_plb_adjustments(era_id: str) -> list[dict]:
         return []
 
     adjustments = []
-    # 835 segments are separated by ~ (tilde)
-    segments = re.split(r"~", content)
-    for seg in segments:
+    for seg in re.split(r"~", content):
         seg = seg.strip()
         if not seg.startswith("PLB"):
             continue
         fields = seg.split("*")
-        # PLB*npi*fiscal_year_end*reason:reference*amount
         if len(fields) < 5:
             continue
         npi = fields[1]
@@ -105,19 +183,7 @@ def _parse_plb_adjustments(era_id: str) -> list[dict]:
             "check_number": check_ref,
             "amount": amount,
         })
-
     return adjustments
-
-
-def _extract_era_id_from_filename(file_name: str) -> str:
-    """Extract the Claim.MD ERA ID from an EDI filename like 'era_MCC02_72325594.x12 - 04/01/2026'."""
-    # Pattern: era_{payerid}_{eraid}.x12
-    match = re.search(r"era_[A-Za-z0-9]+_(\d+)", file_name)
-    if match:
-        return match.group(1)
-    # Fallback: era_{eraid}.x12
-    match = re.search(r"era_(\d+)", file_name)
-    return match.group(1) if match else ""
 
 
 # Irregular ERA patterns — skip these
@@ -232,21 +298,21 @@ async def _write_off_plb_adjustment(
 async def post_pending_eras() -> dict:
     """
     Post all pending ERA/EDI files in Lauris via the web interface.
-    After posting, checks for PLB adjustments (ACH fees) and auto-writes-off
-    amounts <= $25. Flags larger PLB amounts for human review.
-
-    Returns dict with counts: posted, skipped_irregular, already_posted, errors.
+    After each successful post, parses PLB segments and either auto-writes-off
+    amounts <= $25 or flags larger amounts for human review.
     """
     result = {
         "posted": 0,
         "skipped_irregular": 0,
         "skipped_old": 0,
         "skipped_already_posted": 0,
+        "skipped_unpostable": 0,
         "errors": 0,
         "plb_writeoffs": 0,
         "plb_flagged": 0,
         "posted_files": [],
         "irregular_files": [],
+        "failed_files": [],
         "plb_details": [],
     }
 
@@ -257,6 +323,15 @@ async def post_pending_eras() -> dict:
     try:
         async with LaurisSession() as lauris:
             base = lauris.login_url.rsplit("/", 1)[0]
+
+            # Lauris fires a native JavaScript confirm() dialog after clicking
+            # "Post Selected File": 'This will send the items to AR Posting.'
+            # Without accepting it, Playwright's default is to dismiss → the
+            # form never submits and the post silently fails. Accept all dialogs.
+            lauris.page.on(
+                "dialog",
+                lambda d: asyncio.create_task(d.accept()),
+            )
 
             # Navigate to EDI Results page
             await lauris.page.goto(
@@ -279,6 +354,13 @@ async def post_pending_eras() -> dict:
                 tracked=len(already_posted_local),
             )
 
+            # Load explicit ignore list (unpostable ERAs + known phantoms)
+            unpostable = _load_unpostable_eras()
+            logger.info(
+                "Loaded unpostable ERA ignore list",
+                count=len(unpostable),
+            )
+
             files_to_post = []
             for opt in options:
                 val = await opt.get_attribute("value") or ""
@@ -299,13 +381,23 @@ async def post_pending_eras() -> dict:
                         logger.info("Skipping irregular ERA",
                                     file=text, type=irr_type)
                         break
-
                 if is_irregular:
                     continue
 
                 # Check if already posted (local tracking)
                 if val in already_posted_local:
                     result["skipped_already_posted"] += 1
+                    continue
+
+                # Check explicit ignore list (known-unpostable + phantom duplicates)
+                if val in unpostable:
+                    result["skipped_unpostable"] += 1
+                    logger.info(
+                        "Skipping unpostable ERA",
+                        file=text,
+                        file_val=val,
+                        reason=unpostable[val][:120],
+                    )
                     continue
 
                 # Check age — only post recent files
@@ -325,110 +417,226 @@ async def post_pending_eras() -> dict:
                 files_to_post.append((val, text))
 
             logger.info(f"Posting {len(files_to_post)} ERA files")
+            api = ClaimMDAPI()
 
             # Post each file
             for file_val, file_name in files_to_post:
                 try:
-                    # Step 1: Select the file from dropdown
-                    await lauris.page.select_option(
-                        "select[name='ddlEDIFiles']", value=file_val
-                    )
-                    await asyncio.sleep(0.5)
-
-                    # Step 2: Click "Post Selected File" to load items into grid
-                    await lauris.page.click(
-                        "input[name='btnPostFile']", timeout=10000
-                    )
-                    await asyncio.sleep(3)
-
-                    # Step 3: Check all checkboxes in the results grid
-                    checkboxes = await lauris.page.query_selector_all(
-                        "table input[type='checkbox'], "
-                        "input[type='checkbox'][name*='chk'], "
-                        "input[type='checkbox'][name*='Check'], "
-                        "input[type='checkbox'][name*='select']"
-                    )
-                    checked_count = 0
-                    for cb in checkboxes:
+                    # Look up the 835 metadata needed to fill the AREntry form.
+                    # Lauris requires Deposit Date, Period, and Check Number to
+                    # commit a posting — all of which are in the 835 itself.
+                    era_id = _parse_era_id_from_filename(file_name)
+                    check_date = period = check_no = ""
+                    meta: dict = {}
+                    if era_id and api.key:
                         try:
-                            if await cb.is_visible():
-                                await cb.check()
-                                checked_count += 1
-                        except Exception:
-                            pass
-                    logger.info("Checked grid items",
-                                file=file_name, items=checked_count)
-
-                    # Step 4: Click the "Post" button at the bottom to
-                    # actually send items to billing
-                    post_btn = await lauris.page.query_selector(
-                        "input[name='btnPost'], input[value='Post'], "
-                        "button:has-text('Post')"
-                    )
-                    if post_btn and await post_btn.is_visible():
-                        await post_btn.click()
-                        await asyncio.sleep(5)
-                        logger.info("Clicked Post button", file=file_name)
-                    else:
-                        logger.warning(
-                            "Post button not found — ERA may not be posted",
-                            file=file_name,
-                        )
-
-                    # Step 5: Verify success/error
-                    page_text = await lauris.page.inner_text("body")
-                    posting_error = False
-                    for error_indicator in [
-                        "error", "failed", "unable to post",
-                        "exception", "could not process",
-                        "out of balance", "mismatch",
-                    ]:
-                        if error_indicator in page_text.lower():
-                            posting_error = True
-                            break
-
-                    if posting_error:
-                        try:
-                            screenshot_path = f"/tmp/claims_work/era_post_error_{file_val}.png"
-                            await lauris.page.screenshot(path=screenshot_path)
-                            logger.error(
-                                "ERA posting error detected — screenshot saved",
-                                file=file_name,
-                                screenshot=screenshot_path,
+                            content = await api.download_era_835(era_id)
+                            if content:
+                                meta = _parse_835_metadata(content)
+                                check_date = _ccyymmdd_to_mmddyyyy(meta["bpr16"])
+                                period     = _ccyymmdd_to_yyyymm(meta["bpr16"])
+                                check_no   = meta["trn02"]
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to download 835 for metadata",
+                                era_id=era_id, error=str(e)[:120],
                             )
-                        except Exception:
-                            logger.error("ERA posting error detected",
-                                         file=file_name)
+
+                    if not (check_date and period and check_no):
+                        logger.error(
+                            "Missing 835 metadata — cannot post",
+                            file=file_name, era_id=era_id,
+                            have_date=bool(check_date),
+                            have_period=bool(period),
+                            have_check=bool(check_no),
+                        )
                         result["errors"] += 1
-                        # Navigate back to EDI Results for next file
+                        result["failed_files"].append({
+                            "file_name": file_name,
+                            "file_val": file_val,
+                            "reason": f"missing_835_metadata (era_id={era_id})",
+                            "screenshot": "",
+                        })
                         await lauris.page.goto(
                             f"{base}/{EDI_RESULTS_PATH}",
                             wait_until="domcontentloaded",
                             timeout=20000,
                         )
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(2)
                         continue
 
-                    # Navigate back to EDI Results for next file
+                    # Select the file from dropdown
+                    await lauris.page.select_option(
+                        "select[name='ddlEDIFiles']", value=file_val
+                    )
+                    await asyncio.sleep(0.5)
+
+                    # Click "Post Selected File" — fires a native confirm()
+                    # dialog which our dialog handler auto-accepts. Lauris
+                    # then navigates to AREntry.aspx with the paid amount
+                    # in the URL (?edircvd=<dollars>).
+                    await lauris.page.click(
+                        "input[name='btnPostFile']", timeout=10000
+                    )
+                    try:
+                        await lauris.page.wait_for_load_state(
+                            "networkidle", timeout=15000
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+
+                    # Extract the paid amount from the URL Lauris redirected to.
+                    post_url = lauris.page.url
+                    paid_amount = 0.0
+                    m = re.search(r"edircvd=([0-9.]+)", post_url)
+                    if m:
+                        try:
+                            paid_amount = float(m.group(1))
+                        except ValueError:
+                            paid_amount = 0.0
+
+                    # Amount-mismatch pre-check: if Lauris's edircvd differs
+                    # from the Claim.MD 835's BPR02 by more than a penny, the
+                    # Claim.MD 835 we have is a *different* file than Lauris's
+                    # internal copy. This is typically caused by PLB (Provider
+                    # Level Balance) segments like ACH fees — era_manager's
+                    # PLB stripping should prevent this, but if it slips
+                    # through we fail loudly so Desiree can investigate.
+                    try:
+                        bpr02 = float(meta.get("bpr02") or 0)
+                    except ValueError:
+                        bpr02 = 0.0
+                    if paid_amount and bpr02 and abs(paid_amount - bpr02) > 0.01:
+                        logger.error(
+                            "Amount mismatch — Lauris and Claim.MD "
+                            "have different 835 amounts; cannot safely post "
+                            "(should have been caught by PLB stripping — investigate)",
+                            file=file_name,
+                            lauris_amount=f"${paid_amount:,.2f}",
+                            claimmd_amount=f"${bpr02:,.2f}",
+                            delta=f"${abs(paid_amount - bpr02):,.2f}",
+                            era_id=era_id,
+                        )
+                        result["errors"] += 1
+                        result["failed_files"].append({
+                            "file_name": file_name,
+                            "file_val": file_val,
+                            "reason": (
+                                f"amount_mismatch (Lauris=${paid_amount:,.2f}, "
+                                f"Claim.MD=${bpr02:,.2f}, era_id={era_id}) — "
+                                f"add to data/unpostable_eras.json or investigate "
+                                f"PLB stripping in era_manager.py"
+                            ),
+                            "screenshot": "",
+                        })
+                        await lauris.page.goto(
+                            f"{base}/{EDI_RESULTS_PATH}",
+                            wait_until="domcontentloaded",
+                            timeout=20000,
+                        )
+                        await asyncio.sleep(2)
+                        continue
+
+                    # On AREntry.aspx, fill Deposit Date / Period / Check
+                    # Number and click Post Payments to commit the post.
+                    # The date field opens a jQuery datepicker on focus;
+                    # set it directly via the DOM to avoid the picker
+                    # overlay stealing subsequent clicks.
+                    await lauris.page.evaluate(
+                        """([date]) => {
+                            const el = document.querySelector(
+                                "input[name='txtCheckDate']"
+                            );
+                            if (el) {
+                                el.value = date;
+                                el.dispatchEvent(
+                                    new Event('change', {bubbles: true})
+                                );
+                            }
+                        }""",
+                        [check_date],
+                    )
+                    await lauris.page.fill(
+                        "input[name='txtPeriod']", period
+                    )
+                    await lauris.page.fill(
+                        "input[name='txtEDICheckNo']", check_no
+                    )
+                    await asyncio.sleep(0.3)
+                    await lauris.page.click(
+                        "input[name='btnStart']", timeout=10000
+                    )
+                    try:
+                        await lauris.page.wait_for_load_state(
+                            "networkidle", timeout=30000
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+
+                    # Navigate back to the EDI Results page so we can verify
+                    # the file is gone and prepare for the next iteration.
                     await lauris.page.goto(
                         f"{base}/{EDI_RESULTS_PATH}",
                         wait_until="domcontentloaded",
                         timeout=20000,
                     )
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+
+                    # Definitive success check: the target file_val must no
+                    # longer be in the dropdown. This replaces the brittle
+                    # page-text scan (Lauris fails silently on confirm-dismiss).
+                    still_present_el = await lauris.page.query_selector(
+                        f"select[name='ddlEDIFiles'] option[value='{file_val}']"
+                    )
+                    if still_present_el is not None:
+                        screenshot_path = ""
+                        try:
+                            screenshot_path = (
+                                f"/tmp/claims_work/era_post_error_{file_val}.png"
+                            )
+                            await lauris.page.screenshot(path=screenshot_path)
+                        except Exception:
+                            screenshot_path = ""
+                        logger.error(
+                            "ERA post failed — file still in dropdown after click",
+                            file=file_name,
+                            post_url=post_url,
+                            screenshot=screenshot_path,
+                        )
+                        result["errors"] += 1
+                        result["failed_files"].append({
+                            "file_name": file_name,
+                            "file_val": file_val,
+                            "reason": (
+                                f"file_still_in_dropdown_after_click "
+                                f"(post_url={post_url})"
+                            ),
+                            "screenshot": screenshot_path,
+                        })
+                        continue
 
                     result["posted"] += 1
-                    result["posted_files"].append(file_name)
+                    result["posted_files"].append(
+                        f"{file_name} → ${paid_amount:,.2f}" if paid_amount
+                        else file_name
+                    )
                     already_posted_local.add(file_val)
-                    logger.info("ERA posted successfully", file=file_name)
+                    logger.info(
+                        "ERA posted successfully",
+                        file=file_name,
+                        paid=f"${paid_amount:,.2f}" if paid_amount else "?",
+                    )
 
-                    # Check for PLB adjustments (ACH fees, etc.)
-                    era_id = _extract_era_id_from_filename(file_name)
+                    # After a successful post, parse the 835 for PLB (Provider
+                    # Level Balance) segments — typically ACH fees the MCO
+                    # deducted from the payment — and either auto-write-off
+                    # small amounts or flag larger ones for human review.
                     if era_id:
                         plb_adjustments = _parse_plb_adjustments(era_id)
                         for adj in plb_adjustments:
                             if adj["amount"] <= PLB_AUTO_WRITEOFF_MAX:
-                                # Auto-write-off small PLB fees
                                 reason = (
                                     f"PLB adjustment — ACH fee "
                                     f"(check {adj['check_number']}, "
@@ -463,7 +671,6 @@ async def post_pending_eras() -> dict:
                                         f"needs manual review"
                                     )
                             else:
-                                # Flag large PLB for human review
                                 result["plb_flagged"] += 1
                                 result["plb_details"].append(
                                     f"{file_name}: PLB ${adj['amount']:.2f} "
@@ -482,6 +689,12 @@ async def post_pending_eras() -> dict:
                     result["errors"] += 1
                     logger.error("ERA post failed",
                                  file=file_name, error=str(e))
+                    result["failed_files"].append({
+                        "file_name": file_name,
+                        "file_val": file_val,
+                        "reason": f"exception: {str(e)[:200]}",
+                        "screenshot": "",
+                    })
 
             # Save posted ERA tracking
             _save_posted_eras(already_posted_local)
@@ -530,6 +743,7 @@ async def post_pending_eras() -> dict:
 
     logger.info("ERA posting complete", **{
         k: v for k, v in result.items()
-        if k not in ("posted_files", "irregular_files", "plb_details")
+        if k not in ("posted_files", "irregular_files",
+                     "failed_files", "plb_details")
     })
     return result
