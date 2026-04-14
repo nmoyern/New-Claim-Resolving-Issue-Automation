@@ -22,6 +22,19 @@ data/*.db-shm
 data/era_status.json
 data/last_responseid.txt
 
+# Per-run state files — regenerated every run, not code
+data/posted_eras.json
+data/availity_responses/
+
+# Generated reports (live copies stay in Dropbox) — not code
+docs/outstanding_claims_unified.xlsx
+docs/powerbi_ar_report.xlsx
+docs/fax_tracking_report.xlsx
+docs/fax_tracking_report.txt
+
+# Log files — may contain PHI and stack traces
+logs/*.log
+
 # Downloaded files
 /tmp/
 logs/screenshots/
@@ -35,4 +48,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
-~.xlsx
+
+# Excel lock files
+~$*.xlsx
+~$*.xlsm
