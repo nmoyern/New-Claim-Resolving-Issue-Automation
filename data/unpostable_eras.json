@@ -1,0 +1,53 @@
+{
+  "_description": "ERA file_vals the automation should NEVER attempt to post. Each entry includes the reason and how it was verified. The daily 7am automation (and run_era_workflow.py wrapper) should skip these without flagging them as failures. Edit this file with care — wrong entries could cause real ERAs to be silently dropped.",
+  "_last_updated": "2026-04-14T13:30:00",
+  "_updated_by": "claude (era-posting-debug session)",
+  "ignored": [
+    {
+      "file_val": "18984-0",
+      "file_name": "era_54154_66044326.x12",
+      "payer": "Sentara (54154)",
+      "lauris_edircvd": 16345.20,
+      "claimmd_bpr02": 9140.69,
+      "category": "amount_mismatch",
+      "reason": "Claim.MD download_era_835(66044326) returns a 12/19/2025 Sentara 835 for $9,140.69 (TRN 796156758). Lauris's own copy in its EDI queue has a different amount ($16,345.20) and different internal metadata. The automation can't derive valid form values from Claim.MD for this file. Manual posting required through Lauris EDI Results.",
+      "verified_in_ar": false
+    },
+    {
+      "file_val": "18920-0",
+      "file_name": "era_MCC02_72325594.x12",
+      "payer": "Molina (MCC02)",
+      "lauris_edircvd": 847.04,
+      "claimmd_bpr02": 830.18,
+      "category": "amount_mismatch",
+      "reason": "Claim.MD download_era_835(72325594) returns a Molina 835 for $830.18 (TRN 1237881412). Lauris's own copy has a different amount ($847.04) and different internal metadata. Automation can't derive valid form values. Manual posting required.",
+      "verified_in_ar": false
+    },
+    {"file_val": "18984-1", "file_name": "era_54154_66044326.x12", "category": "phantom_duplicate", "reason": "Same file as 18984-0, which is in the amount_mismatch category. Skip."},
+    {"file_val": "18920-1", "file_name": "era_MCC02_72325594.x12", "category": "phantom_duplicate", "reason": "Same file as 18920-0, which is in the amount_mismatch category. Skip."},
+    {"file_val": "19013-1", "file_name": "era_54154_72658480.x12", "category": "phantom_duplicate_of_posted", "reason": "Lauris's clearinghouse redelivered 19013 after it was successfully posted as 19013-0. The money is already applied in AR (verified via Check_Number 859081217). No-op if posted again."},
+    {"file_val": "19012-1", "file_name": "era_54154_72658451.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19012-0 (TRN 859091751)."},
+    {"file_val": "19011-1", "file_name": "era_MCC02_72554441.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19011-0 (TRN 1238487710)."},
+    {"file_val": "19010-1", "file_name": "era_61101_72543335.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19010-0 (TRN 183593527260403)."},
+    {"file_val": "19009-1", "file_name": "era_87748_72538553.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19009-0 (TRN 26093B1000867977)."},
+    {"file_val": "19008-1", "file_name": "era_61101_72405915.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19008-0 (TRN 183513426260401)."},
+    {"file_val": "19007-1", "file_name": "era_87748_72394488.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19007-0 (TRN 26091B1001763507)."},
+    {"file_val": "19006-1", "file_name": "era_87748_72392273.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19006-0 (TRN 26091B1001775117)."},
+    {"file_val": "19005-1", "file_name": "era_00423_72338235.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19005-0 (TRN 1108335218)."},
+    {"file_val": "19004-1", "file_name": "era_MCC02_72083027.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 19004-0 (TRN 1237364893)."},
+    {"file_val": "18922-1", "file_name": "era_54154_72361202.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18922-0 (TRN 856314934)."},
+    {"file_val": "18921-1", "file_name": "era_54154_72358544.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18921-0 (TRN 856592214, $75,636.28)."},
+    {"file_val": "18919-1", "file_name": "era_MCC02_72321500.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18919-0 (TRN 1237870143)."},
+    {"file_val": "18918-1", "file_name": "era_VAMCD_72311905.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18918-0 (TRN 910000194144960)."},
+    {"file_val": "18917-1", "file_name": "era_VAMCD_72311855.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18917-0 (TRN 910000194143524)."},
+    {"file_val": "18916-1", "file_name": "era_61101_72222877.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18916-0 (TRN 183253309260330)."},
+    {"file_val": "18915-1", "file_name": "era_54154_72317014.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18915-0 (TRN 856297473, $52,516.48)."},
+    {"file_val": "18824-1", "file_name": "era_04567_71961875.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18824-0 (TRN 26085B1000877445)."},
+    {"file_val": "18823-1", "file_name": "era_61101_71936639.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18823-0 (TRN 182700284260325)."},
+    {"file_val": "18822-1", "file_name": "era_04567_71920860.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18822-0 (TRN 26084B1001778368)."},
+    {"file_val": "18821-1", "file_name": "era_04567_71920302.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18821-0 (TRN 26084B1001798878)."},
+    {"file_val": "18820-1", "file_name": "era_54154_71005692.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18820-0 (TRN 843107893)."},
+    {"file_val": "18807-1", "file_name": "era_54154_71905665.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18807-0 (TRN 852087394)."},
+    {"file_val": "18806-1", "file_name": "era_54154_71885496.x12", "category": "phantom_duplicate_of_posted", "reason": "Already applied in AR as 18806-0 (TRN 852087333)."}
+  ]
+}
