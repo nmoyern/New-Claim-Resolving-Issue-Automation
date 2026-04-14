@@ -51,9 +51,12 @@ OUT_DIR = PROJECT_ROOT / "data" / "availity_responses"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 AVAILITY_BASE = "https://api.availity.com"
-LAURIS_DOB_URL = (
+# Lauris custom view "Claim_DOB__x0026__Gender_AUTOMATION" — returns
+# Unique_ID, Client_Name, DOB, Gender for ~3400 patients. Join key is
+# Unique_ID which matches the `Unique ID` column in the unified report.
+LAURIS_DEMOGRAPHICS_URL = (
     "https://www12.laurisonline.com/reports/formsearchdataviewXML.aspx"
-    "?viewid=WvTNQZUwyWAc8Mg%2bXPPN1w%3d%3d"
+    "?viewid=sJW17xYGLrrCB7izAXPf4Q%3d%3d"
 )
 
 N = int(os.environ.get("N", "50"))
@@ -122,24 +125,39 @@ def get_prod_token() -> str:
     return json.loads(raw)["access_token"]
 
 
-def fetch_lauris_dob() -> dict:
+def fetch_lauris_demographics() -> dict:
+    """{Unique_ID: {first, last, dob, gender_code}} from the
+    Claim_DOB__x0026__Gender_AUTOMATION view. Gender comes back as the
+    strings 'Male'/'Female' which we map to the Availity 276 codes 'M'/'F'."""
     r = requests.get(
-        LAURIS_DOB_URL,
+        LAURIS_DEMOGRAPHICS_URL,
         auth=(os.environ["LAURIS_USERNAME"], os.environ["LAURIS_PASSWORD"]),
         timeout=300,
     )
     r.raise_for_status()
     root = ET.fromstring(r.text)
     out = {}
-    for row in root.findall("Claims_DOB_Info"):
+    for row in root.findall("Claim_DOB__x0026__Gender_AUTOMATION"):
         uid = (row.findtext("Unique_ID") or "").strip()
         dob = (row.findtext("DOB") or "").strip()[:10]
-        if uid and dob:
-            out[uid] = {
-                "first": (row.findtext("First_Name") or "").strip().upper(),
-                "last":  (row.findtext("Last_Name") or "").strip().upper(),
-                "dob":   dob,
-            }
+        if not (uid and dob):
+            continue
+        full_name = (row.findtext("Client_Name") or "").strip()
+        # Client_Name is "First Last" or "First Middle Last"
+        parts = full_name.split()
+        first = parts[0].upper() if parts else ""
+        last = parts[-1].upper() if len(parts) >= 2 else ""
+        gender_raw = (row.findtext("Gender") or "").strip().lower()
+        gender_code = "F" if gender_raw.startswith("f") else (
+            "M" if gender_raw.startswith("m") else "U"
+        )
+        out[uid] = {
+            "first": first,
+            "last":  last,
+            "dob":   dob,
+            "gender_code": gender_code,
+            "full_name": full_name,
+        }
     return out
 
 
@@ -271,7 +289,7 @@ def pick_eligible(df, demo, n, seen_uids=None):
 async def main():
     print(f"Availity 276 bucketing — up to {N} claims")
     token = get_prod_token()
-    demo = fetch_lauris_dob()
+    demo = fetch_lauris_demographics()
     print(f"  Lauris DOB: {len(demo)} patients")
     df = pd.read_excel(REPORT)
     print(f"  report rows: {len(df)}")
@@ -300,7 +318,7 @@ async def main():
             "patient.lastName":                   info["last"],
             "patient.firstName":                  info["first"],
             "patient.birthDate":                  info["dob"],
-            "patient.genderCode":                 "M",  # TODO: add gender source
+            "patient.genderCode":                 info.get("gender_code", "M"),
             "patient.subscriberRelationshipCode": "18",
             "fromDate":                           dos_str,
             "toDate":                             dos_str,

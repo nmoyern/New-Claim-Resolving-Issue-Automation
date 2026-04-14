@@ -41,9 +41,11 @@ OUT_DIR = PROJECT_ROOT / "data" / "availity_responses" / "entity_sweep"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 AVAILITY_BASE = "https://api.availity.com"
-LAURIS_DOB_URL = (
+# Lauris custom view "Claim_DOB__x0026__Gender_AUTOMATION" — patient
+# demographics (Unique_ID / Client_Name / DOB / Gender) for ~3400 patients.
+LAURIS_DEMOGRAPHICS_URL = (
     "https://www12.laurisonline.com/reports/formsearchdataviewXML.aspx"
-    "?viewid=WvTNQZUwyWAc8Mg%2bXPPN1w%3d%3d"
+    "?viewid=sJW17xYGLrrCB7izAXPf4Q%3d%3d"
 )
 
 # Every LCI entity that could legitimately bill a patient
@@ -117,24 +119,36 @@ def get_prod_token() -> str:
     return json.loads(r)["access_token"]
 
 
-def fetch_lauris_dob() -> dict:
+def fetch_lauris_demographics() -> dict:
+    """{Unique_ID: {first, last, dob, gender_code}} from the
+    Claim_DOB__x0026__Gender_AUTOMATION view."""
     r = requests.get(
-        LAURIS_DOB_URL,
+        LAURIS_DEMOGRAPHICS_URL,
         auth=(os.environ["LAURIS_USERNAME"], os.environ["LAURIS_PASSWORD"]),
         timeout=300,
     )
     r.raise_for_status()
     root = ET.fromstring(r.text)
     out = {}
-    for row in root.findall("Claims_DOB_Info"):
+    for row in root.findall("Claim_DOB__x0026__Gender_AUTOMATION"):
         uid = (row.findtext("Unique_ID") or "").strip()
         dob = (row.findtext("DOB") or "").strip()[:10]
-        if uid and dob:
-            out[uid] = {
-                "first": (row.findtext("First_Name") or "").strip().upper(),
-                "last":  (row.findtext("Last_Name") or "").strip().upper(),
-                "dob":   dob,
-            }
+        if not (uid and dob):
+            continue
+        full_name = (row.findtext("Client_Name") or "").strip()
+        parts = full_name.split()
+        first = parts[0].upper() if parts else ""
+        last = parts[-1].upper() if len(parts) >= 2 else ""
+        gender_raw = (row.findtext("Gender") or "").strip().lower()
+        gender_code = "F" if gender_raw.startswith("f") else (
+            "M" if gender_raw.startswith("m") else "U"
+        )
+        out[uid] = {
+            "first": first,
+            "last":  last,
+            "dob":   dob,
+            "gender_code": gender_code,
+        }
     return out
 
 
@@ -215,7 +229,7 @@ async def main():
     token = get_prod_token()
     print(f"Token ok ({len(token)} chars)\n")
 
-    demo = fetch_lauris_dob()
+    demo = fetch_lauris_demographics()
     df = pd.read_excel(REPORT)
 
     # Parse CLI overrides or use defaults
@@ -249,6 +263,7 @@ async def main():
             "member": str(row["Member ID"]).strip(),
             "entity": str(row["Entity"]),
             "first": info["first"], "last": info["last"], "dob": info["dob"],
+            "gender_code": info.get("gender_code", "M"),
             "billed_npi": ENTITY_TO_NPI.get(str(row["Entity"]), ""),
         })
 
@@ -279,7 +294,7 @@ async def main():
                 "patient.lastName":                   case["last"],
                 "patient.firstName":                  case["first"],
                 "patient.birthDate":                  case["dob"],
-                "patient.genderCode":                 "M",  # TODO: add gender source
+                "patient.genderCode":                 case.get("gender_code", "M"),
                 "patient.subscriberRelationshipCode": "18",
                 "fromDate":                           case["dos"],
                 "toDate":                             case["dos"],
