@@ -115,10 +115,18 @@ async def ensure_claim_patient_identity(claim: Claim) -> Claim:
             provider_taxid=provider_taxid,
             member_id=claim.client_id,
         )
-        dob = str(elig.get("ins_dob", "") or "").strip()
+        # Response may be {"elig": {"ins_dob": ..., "ins_sex": ...}} or flat
+        elig_data = elig.get("elig", elig) if isinstance(elig.get("elig"), dict) else elig
+        dob = str(elig_data.get("ins_dob", "") or "").strip()
         if dob:
+            # Normalize YYYYMMDD → YYYY-MM-DD for Availity
+            if len(dob) == 8 and dob.isdigit():
+                dob = f"{dob[:4]}-{dob[4:6]}-{dob[6:8]}"
             claim.client_dob = dob
-            logger.info("Recovered patient DOB from Claim.MD eligibility", claim_id=claim.claim_id)
+            logger.info("Recovered patient DOB from Claim.MD eligibility", claim_id=claim.claim_id, dob=dob)
+        gender_raw = str(elig_data.get("ins_sex", "") or "").strip()
+        if gender_raw and not getattr(claim, "gender_code", ""):
+            claim.gender_code = gender_raw[0].upper() if gender_raw else ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("Claim.MD eligibility fallback failed", claim_id=claim.claim_id, error=str(exc))
     return claim
