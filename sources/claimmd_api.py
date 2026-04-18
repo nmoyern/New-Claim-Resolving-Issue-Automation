@@ -36,6 +36,7 @@ PAYER_MCO_MAP = {
     "128VA": "aetna",      # Aetna Better Health of Virginia
     # Molina (849 claims)
     "MCCVA": "molina",     # Molina Complete Care of Virginia
+    "MCC02": "molina",     # Molina Complete Care alt ID
     # United (118 claims)
     "87726": "united",     # United Health Care
     "77350": "united",     # UHC alt
@@ -45,6 +46,7 @@ PAYER_MCO_MAP = {
     "SB923": "anthem",     # Anthem alt
     # DMAS / Straight Medicaid (66 claims)
     "SPAYORCODE": "dmas",  # Straight Medicaid / DMAS
+    "VAMCD": "dmas",       # Virginia Medicaid / DMAS
     # Humana
     "31140": "humana",     # Humana
     "61101": "humana",     # Humana alt

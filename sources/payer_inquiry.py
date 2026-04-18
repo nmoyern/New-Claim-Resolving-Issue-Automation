@@ -30,10 +30,10 @@ AVAILITY_PAYER_IDS = {
     MCO.SENTARA: "54154",
     MCO.AETNA: "ABHVA",
     MCO.ANTHEM: "423",
-    MCO.MOLINA: "MCCVA",
+    MCO.MOLINA: "MCC02",
     MCO.HUMANA: "61101",
     MCO.MAGELLAN: "38217",
-    MCO.DMAS: "SPAYORCODE",
+    # DMAS: no valid Availity 276 payer ID found — routes to unsupported_mco
 }
 
 
