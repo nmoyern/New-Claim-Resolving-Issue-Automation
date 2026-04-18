@@ -535,8 +535,8 @@ class ClaimMDAPI:
 
     async def get_claim_notes(self, claim_id: str) -> List[dict]:
         """Get notes for a specific claim."""
-        result = await self._post("notes", {"ClaimID": claim_id})
-        return result.get("note", [])
+        result = await self._post("notes", {"ClaimMD_ID": claim_id})
+        return result.get("notes", [])
 
     async def add_claim_note(self, claim_id: str, note_text: str) -> bool:
         """Add a note to a claim via API (no browser needed)."""
