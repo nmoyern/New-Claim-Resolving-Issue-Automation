@@ -603,12 +603,12 @@ def _denial_to_gap_category(claim: Claim):
 # (keyword, description, max_age_days or None for permanent)
 _RESOLUTION_KEYWORDS = [
     ("write off", "written off", None),
-    ("rebilled", "rebilled", None),
+    ("rebilled", "rebilled", 14),
     ("appeal submitted", "appeal in progress", 30),
     ("reconsideration submitted", "reconsideration in progress", 30),
     ("claim archived", "archived", None),
     ("self pay", "self-pay — should not have been billed", None),
-    ("just billed", "recently rebilled", None),
+    ("just billed", "recently billed", 14),
 ]
 
 
