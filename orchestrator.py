@@ -179,18 +179,34 @@ async def run_daily(
         actions=[a.value for a in todays_actions],
     )
 
+    ar_claims = []
     try:
-        outstanding_claims = fetch_outstanding_claims(lookback_days=365)
-        ar_lookup = build_ar_lookup(outstanding_claims)
-        logger.info(
-            "Outstanding/balance due lookup loaded",
-            entries=len(ar_lookup),
+        logger.info("Step 0: Fetching Lauris XML outstanding claims")
+        ar_claims = fetch_outstanding_claims(lookback_days=365)
+        ar_lookup = build_ar_lookup(ar_claims)
+
+        # Enrich Lauris AR data with Claim.MD notes and denial reasons
+        notes_lookup, denials_lookup = await fetch_claimmd_notes_and_denials()
+        enrich_with_claimmd_notes(ar_claims, notes_lookup, denials_lookup)
+
+        total_outstanding = sum(
+            c.get("outstanding", 0) for c in ar_claims
         )
+        logger.info(
+            "Lauris XML AR data loaded",
+            ar_claims=len(ar_claims),
+            entries=len(ar_lookup),
+            total_outstanding=f"${total_outstanding:,.2f}",
+        )
+
+        # Generate unified Excel report
+        generate_unified_excel(ar_claims)
     except Exception as e:
         logger.warning(
-            "Outstanding/balance due lookup failed",
+            "Lauris XML fetch failed — will process ALL Claim.MD denials",
             error=str(e),
         )
+        summary.errors.append(f"Lauris XML fetch failed: {e}")
 
     # -------------------------------------------------------
     # Step 1: Full ERA download/stage/posting workflow
@@ -261,6 +277,47 @@ async def run_daily(
         await _post_summary(summary, human_queue, run_report)
         gap_reporter.close()
         return summary
+
+    # -------------------------------------------------------
+    # Step 2b: Cross-reference Claim.MD denials with Lauris AR data
+    # -------------------------------------------------------
+    if ar_claims:
+        pre_filter_count = len(claims)
+        filtered_claims = []
+        skipped_not_in_ar = 0
+
+        for claim in claims:
+            # Rejected claims (status "R") always get processed —
+            # rejections mean the claim never reached the payer
+            if claim.status == ClaimStatus.REJECTED:
+                filtered_claims.append(claim)
+                continue
+
+            # Check if this claim appears in the AR data (still unpaid/underpaid)
+            ar_match = is_claim_in_ar(claim.client_id, claim.dos, ar_claims)
+            if ar_match:
+                filtered_claims.append(claim)
+            else:
+                skipped_not_in_ar += 1
+                logger.debug(
+                    "Skipping claim — not in Lauris AR (already resolved)",
+                    claim_id=claim.claim_id,
+                    client=claim.client_name,
+                    member=claim.client_id,
+                    dos=str(claim.dos),
+                )
+
+        claims = filtered_claims
+        logger.info(
+            "AR cross-reference complete",
+            before=pre_filter_count,
+            after=len(claims),
+            skipped_resolved=skipped_not_in_ar,
+        )
+    else:
+        logger.warning(
+            "No AR data available — processing ALL Claim.MD denials without filtering"
+        )
 
     # -------------------------------------------------------
     # Step 3: Ask payer APIs, then route and execute each claim
