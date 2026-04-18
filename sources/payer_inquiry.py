@@ -52,6 +52,15 @@ class PayerInquiryResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def _mco_to_claimmd_payer_id(mco: MCO) -> str:
+    """Map MCO enum to the Claim.MD payer ID needed for eligibility lookups."""
+    _MAP = {
+        MCO.UNITED: OPTUM_PAYER_ID,
+        **AVAILITY_PAYER_IDS,
+    }
+    return _MAP.get(mco, "")
+
+
 def is_billed_rejected_or_denied(claim: Claim) -> bool:
     """
     Keep only claims that were actually billed and came back rejected/denied.
@@ -92,10 +101,15 @@ async def ensure_claim_patient_identity(claim: Claim) -> Claim:
         entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
         provider_npi = entity.billing_npi if entity else claim.npi
         provider_taxid = entity.tax_id if entity else ""
+        # Use the Claim.MD payer ID (e.g. "54154") not the MCO enum value ("sentara")
+        elig_payer_id = getattr(claim, "claimmd_payer_id", "") or _mco_to_claimmd_payer_id(claim.mco)
+        if not elig_payer_id:
+            logger.warning("No Claim.MD payer ID for eligibility fallback", claim_id=claim.claim_id, mco=claim.mco.value)
+            return claim
         elig = await api.check_eligibility(
             member_last=last,
             member_first=first,
-            payer_id=claim.mco.value,
+            payer_id=elig_payer_id,
             service_date=claim.dos.strftime("%Y%m%d"),
             provider_npi=provider_npi,
             provider_taxid=provider_taxid,

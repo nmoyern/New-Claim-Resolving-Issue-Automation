@@ -436,6 +436,7 @@ class ClaimMDAPI:
             claimmd_url=f"https://www.claim.md/monitor.plx?l=claim&id={claim_id}",
         )
         claim.patient_account_number = pcn
+        claim.claimmd_payer_id = payer_id
         return claim
 
     # ------------------------------------------------------------------

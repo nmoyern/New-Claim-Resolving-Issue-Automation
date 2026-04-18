@@ -127,6 +127,7 @@ class Claim:
     recon_submitted: Optional[date] = None
     appeal_submitted: Optional[date] = None
     claimmd_url:    str = ""
+    claimmd_payer_id: str = ""      # Claim.MD payerid (e.g. "54154") for eligibility lookups
     age_days:       int = 0         # Days since DOS
 
     def __post_init__(self):
