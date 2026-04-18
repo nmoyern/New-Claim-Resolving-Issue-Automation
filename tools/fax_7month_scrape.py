@@ -21,10 +21,10 @@ from dotenv import load_dotenv
 load_dotenv(str(Path(__file__).resolve().parent.parent / ".env"))
 
 import actions.fax_tracker as ft
+from reporting.report_paths import sync_report_file, unique_report_path
 ft.MAX_PDF_DOWNLOADS_PER_RUN = 9999  # No cap
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "claims_history.db"
-REPORT_PATH = Path(__file__).resolve().parent.parent / "docs" / "fax_tracking_report.xlsx"
 
 
 def generate_report():
@@ -33,6 +33,7 @@ def generate_report():
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
+    report_path = unique_report_path("Fax Tracking", "fax_tracking_report", ".xlsx")
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
 
@@ -146,8 +147,9 @@ def generate_report():
     make_sheet("Nextiva Received", "nextiva_nmoyern_received")
 
     conn.close()
-    wb.save(str(REPORT_PATH))
-    print(f"[{datetime.now().strftime('%I:%M %p')}] Report saved: {REPORT_PATH.name} | {total_all} entries | {total_named} named")
+    wb.save(str(report_path))
+    sync_report_file(report_path, "Fax Tracking")
+    print(f"[{datetime.now().strftime('%I:%M %p')}] Report saved: {report_path} | {total_all} entries | {total_named} named")
 
 
 async def run_scrape():

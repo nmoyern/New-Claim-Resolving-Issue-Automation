@@ -84,6 +84,33 @@ _ROUTING_TABLE: dict[DenialCode, Tuple[ResolutionAction, str]] = {
     DenialCode.UNKNOWN:           (ResolutionAction.HUMAN_REVIEW, "unknown_denial_code"),
 }
 
+_DENIAL_PRIORITY: tuple[DenialCode, ...] = (
+    DenialCode.INVALID_ID,
+    DenialCode.INVALID_DOB,
+    DenialCode.INVALID_NPI,
+    DenialCode.INVALID_DIAG,
+    DenialCode.DIAGNOSIS_BLANK,
+    DenialCode.MISSING_NPI_RENDERING,
+    DenialCode.WRONG_BILLING_CO,
+    DenialCode.PROVIDER_NOT_CERTIFIED,
+    DenialCode.DUPLICATE,
+    DenialCode.TIMELY_FILING,
+    DenialCode.NO_AUTH,
+    DenialCode.AUTH_EXPIRED,
+    DenialCode.EXCEEDED_UNITS,
+    DenialCode.NOT_ENROLLED,
+    DenialCode.COVERAGE_TERMINATED,
+    DenialCode.UNDERPAID,
+    DenialCode.RURAL_RATE_REDUCTION,
+    DenialCode.RECOUPMENT,
+    DenialCode.UNLISTED_PROCEDURE,
+    DenialCode.NEEDS_CALL,
+    DenialCode.RECON_DENIED,
+    DenialCode.NO_RESPONSE_45D,
+    DenialCode.MCO_APPEAL_DENIED,
+    DenialCode.UNKNOWN,
+)
+
 # Irregular ERAs that must never be auto-processed
 _IRREGULAR_ERA_TYPES = {
     "anthem_marys", "united_marys", "recoupment", "straight_medicaid_marys"
@@ -251,15 +278,17 @@ class ClaimRouter:
                 return ResolutionAction.RECONSIDERATION, "timely_filing_recon_after_30d"
             return ResolutionAction.CORRECT_AND_RESUBMIT, "timely_filing_resubmit"
 
-        # 6. Route by primary denial code (first code wins)
+        # 6. Route by the full denial set, using priority order instead of
+        #    blindly trusting the first parsed code.
         if claim.denial_codes:
-            primary = claim.denial_codes[0]
+            primary = _select_priority_denial_code(claim.denial_codes)
             if primary in _ROUTING_TABLE:
                 action, reason = _ROUTING_TABLE[primary]
                 logger.info(
                     "Claim routed",
                     claim_id=claim.claim_id,
                     denial_code=primary.value,
+                    all_denial_codes=",".join(code.value for code in claim.denial_codes),
                     action=action.value,
                 )
                 return action, reason
@@ -285,11 +314,11 @@ class ClaimRouter:
 
 def get_todays_primary_actions() -> List[ResolutionAction]:
     """
-    Returns ALL actions — the system runs on demand (one command, one SMS code).
-    No day-of-week scheduling; the user triggers a full run manually.
+    Return the actions used by this narrower rejected/denied claim workflow.
 
-    Previously had a per-day schedule; removed March 2026 so every run
-    processes everything outstanding.
+    ERA posting is part of the default run so already-paid claims can clear.
+    Billing submission, fax/refax, and broad portal work are not part of the
+    default run in this copied repo.
     """
     return [
         ResolutionAction.ERA_UPLOAD,
@@ -303,3 +332,13 @@ def get_todays_primary_actions() -> List[ResolutionAction]:
         ResolutionAction.REPROCESS_LAURIS,
         ResolutionAction.HUMAN_REVIEW,
     ]
+
+
+def _select_priority_denial_code(denial_codes: List[DenialCode]) -> DenialCode:
+    codes = list(denial_codes or [])
+    if not codes:
+        return DenialCode.UNKNOWN
+    for candidate in _DENIAL_PRIORITY:
+        if candidate in codes:
+            return candidate
+    return codes[0]

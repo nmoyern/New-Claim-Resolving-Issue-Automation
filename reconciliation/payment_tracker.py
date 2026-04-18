@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
+from config.entities import get_entity_by_npi
 from logging_utils.logger import get_logger
 
 logger = get_logger("payment_tracker")
@@ -342,12 +343,15 @@ class PaymentTracker:
     @staticmethod
     def _npi_to_bank(npi: str) -> str:
         """Map provider NPI to bank entity."""
+        entity = get_entity_by_npi(npi)
+        if not entity:
+            return "Unknown Bank"
         mapping = {
-            "1437871753": "Southern Bank (Mary's Home)",
-            "1700297447": "Bank of America (NHCS)",
-            "1306491592": "Wells Fargo (KJLN)",
+            "MARYS_HOME": "Southern Bank (Mary's Home)",
+            "NHCS": "Bank of America (NHCS)",
+            "KJLN": "Wells Fargo (KJLN)",
         }
-        return mapping.get(npi, "Unknown Bank")
+        return mapping.get(entity.key, "Unknown Bank")
 
     @staticmethod
     def _subtract_business_days(from_date: date, days: int) -> date:

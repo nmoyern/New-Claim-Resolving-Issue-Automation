@@ -33,12 +33,14 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+from config.entities import get_all_entities  # noqa: E402
+from reporting.report_paths import report_type_dir, sync_report_file, unique_report_path  # noqa: E402
+
 load_dotenv(PROJECT_ROOT / ".env")
 load_dotenv(Path.home() / "availity-test" / ".env", override=False)
 
 REPORT = PROJECT_ROOT / "docs" / "outstanding_claims_unified.xlsx"
-OUT_DIR = PROJECT_ROOT / "data" / "availity_responses" / "entity_sweep"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = report_type_dir("Availity Entity Sweep")
 
 AVAILITY_BASE = "https://api.availity.com"
 # Lauris custom view "Claim_DOB__x0026__Gender_AUTOMATION" — patient
@@ -51,9 +53,13 @@ LAURIS_DEMOGRAPHICS_URL = (
 # Every LCI entity that could legitimately bill a patient
 ENTITIES = [
     # (label, submitter.id, npi, providers.lastName)
-    ("Mary's Home Inc",    "1636587", "1437871753", "MARYS HOME INC"),
-    ("NHCS / New Heights", "628128",  "1700297447", "NEW HEIGHTS COMMUNITY SUPPORT"),
-    ("KJLN Inc",           "977164",  "1306491592", "KJLN INC"),
+    (
+        entity.display_name,
+        entity.availity_submitter_id,
+        entity.billing_npi,
+        entity.availity_provider_name,
+    )
+    for entity in get_all_entities()
 ]
 
 MCO_TO_PAYER = {
@@ -65,11 +71,9 @@ MCO_TO_PAYER = {
 }
 
 ENTITY_TO_NPI = {
-    "Mary's Home Inc.":              "1437871753",
-    "New Heights Community Support": "1700297447",
-    "Martinsville-NHCS":             "1700297447",
-    "KJLN Inc":                      "1306491592",
+    entity.display_name: entity.billing_npi for entity in get_all_entities()
 }
+ENTITY_TO_NPI["Martinsville-NHCS"] = "1700297447"
 
 NPI_TO_LABEL = {e[2]: e[0] for e in ENTITIES}
 
@@ -300,9 +304,13 @@ async def main():
                 "toDate":                             case["dos"],
             }
             resp = submit_and_poll(token, payload)
-            (OUT_DIR / f"{timestamp}_{case['last']}_{label.replace(' ', '').replace('/', '')}.json").write_text(
-                json.dumps({"payload": payload, "response": resp}, indent=2, default=str)
+            response_path = unique_report_path(
+                "Availity Entity Sweep",
+                f"entity_sweep_{case['last']}_{label.replace(' ', '').replace('/', '')}",
+                ".json",
             )
+            response_path.write_text(json.dumps({"payload": payload, "response": resp}, indent=2, default=str))
+            sync_report_file(response_path, "Availity Entity Sweep")
             summary = summarize(resp)
             case_result["alternates"].append({
                 "label": label, "npi": npi,
@@ -350,8 +358,9 @@ async def main():
     if not any_hits:
         print("  (no alternate-entity hits in this test set)")
 
-    agg = OUT_DIR / f"{timestamp}_rollup.json"
+    agg = unique_report_path("Availity Entity Sweep", "entity_sweep_rollup", ".json")
     agg.write_text(json.dumps(all_results, indent=2, default=str))
+    sync_report_file(agg, "Availity Entity Sweep")
     print(f"\nSaved: {agg}")
 
 

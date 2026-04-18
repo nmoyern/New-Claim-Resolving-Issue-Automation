@@ -29,6 +29,7 @@ from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+from config.entities import get_entity_by_claimmd_region, get_entity_by_npi
 from config.models import Claim, MCO
 from config.settings import DRY_RUN, get_credentials
 from sources.browser_base import BrowserSession
@@ -47,12 +48,9 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 def _get_entity_name(provider_npi: str = "", program: str = "") -> str:
     """Get the correct entity name based on NPI or program.
     Never use 'Life Consultants Inc.' — always the specific entity."""
-    if provider_npi == "1437871753" or "mary" in program.lower():
-        return "Mary's Home Inc."
-    if provider_npi == "1700297447" or "nhcs" in program.lower():
-        return "New Heights Community Support, LLC"
-    if provider_npi == "1306491592" or "kjln" in program.lower():
-        return "KJLN Inc."
+    entity = get_entity_by_npi(provider_npi) or get_entity_by_claimmd_region(program)
+    if entity:
+        return entity.display_name
     return ""  # Never default — investigate via auth lookup
 
 

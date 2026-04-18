@@ -36,7 +36,7 @@ def _make_claim(
     program=Program.NHCS,
     denial_codes=None,
     auth_number="AUTH123",
-    npi="1588094513",
+    npi="1700297447",
     service_code="",
     billing_region="NHCS",
 ) -> Claim:

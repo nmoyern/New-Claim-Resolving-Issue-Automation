@@ -43,6 +43,7 @@ from config.settings import (
 )
 from sources.browser_base import BrowserSession
 from logging_utils.logger import get_logger
+from reporting.report_paths import latest_report_path, report_type_dir, sync_report_file, unique_report_path
 
 logger = get_logger("powerbi")
 
@@ -67,8 +68,7 @@ TOKEN_URL   = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 PBI_API_BASE = "https://api.powerbi.com/v1.0/myorg"
 
 # AR report save location
-AR_REPORT_DIR = Path("data")
-AR_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+AR_REPORT_DIR = report_type_dir("Power BI AR Reports")
 
 # Column aliases — matches Power BI report column names (update to actual headers)
 COLUMN_MAP = {
@@ -201,7 +201,13 @@ class PowerBIARSession(BrowserSession):
         Navigate to the Power BI report, filter to Due & Under Payment,
         export the middle table, and return the downloaded file path.
         """
-        output_path = str(AR_REPORT_DIR / f"powerbi_ar_report.xlsx")
+        output_path = str(
+            unique_report_path(
+                "Power BI AR Reports",
+                "powerbi_ar_report",
+                ".xlsx",
+            )
+        )
 
         logger.info("Navigating to Power BI AR report", url=POWERBI_REPORT_URL)
         await self.page.goto(POWERBI_REPORT_URL, wait_until="domcontentloaded", timeout=60_000)
@@ -242,6 +248,7 @@ class PowerBIARSession(BrowserSession):
             # Move/copy to our standard location
             import shutil
             shutil.copy2(downloaded_path, output_path)
+            sync_report_file(Path(output_path), "Power BI AR Reports")
             logger.info("AR report saved", path=output_path, source=downloaded_path)
             return output_path
         else:
@@ -408,10 +415,14 @@ class PowerBIARSession(BrowserSession):
 
                 # Save the downloaded file
                 dl_path = str(
-                    AR_REPORT_DIR
-                    / f"powerbi_ar_raw_{date.today().isoformat()}.xlsx"
+                    unique_report_path(
+                        "Power BI AR Reports",
+                        "powerbi_ar_raw",
+                        ".xlsx",
+                    )
                 )
                 await download.save_as(dl_path)
+                sync_report_file(Path(dl_path), "Power BI AR Reports")
                 logger.info("Download complete", path=dl_path)
                 return dl_path
             else:
@@ -460,18 +471,18 @@ async def download_powerbi_ar_report() -> str:
     sets date filter to 1-year lookback,
     filters to Due & Under Payment AR statuses,
     exports the middle table data,
-    and saves to data/powerbi_ar_report.xlsx.
+    and saves to the Dropbox Claim Resolution report folder.
 
     Returns the file path of the saved report.
     """
     if DRY_RUN:
         logger.info("DRY_RUN: Skipping Power BI AR report download")
         # Check if we have a recent report to use
-        existing = str(AR_REPORT_DIR / "powerbi_ar_report.xlsx")
-        if Path(existing).exists():
-            logger.info("DRY_RUN: Using existing AR report", path=existing)
-            return existing
-        raise RuntimeError("DRY_RUN: No existing AR report found at data/powerbi_ar_report.xlsx")
+        existing = latest_report_path("Power BI AR Reports", "powerbi_ar_report_*.xlsx")
+        if existing and existing.exists():
+            logger.info("DRY_RUN: Using existing AR report", path=str(existing))
+            return str(existing)
+        raise RuntimeError("DRY_RUN: No existing Power BI AR report found in Dropbox Claim Resolution reports")
 
     async with PowerBIARSession(headless=True) as session:
         return await session.download_ar_report()

@@ -25,11 +25,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from config.entities import entity_npi_map
 from config.models import Claim, DenialCode, MCO, Program
 from config.settings import (
     DR_YANCEY_NPI,
     DRY_RUN,
-    MARYS_HOME_NPI,
     ORG_KJLN,
     ORG_MARYS_HOME,
     ORG_NHCS,
@@ -44,11 +44,7 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "claims_history.db"
 
 # NPI mapping per entity
-ENTITY_NPI_MAP = {
-    "NHCS": "1588094513",
-    "KJLN": "1235723785",
-    "MARYS_HOME": MARYS_HOME_NPI,
-}
+ENTITY_NPI_MAP = entity_npi_map()
 
 # Programs that require rendering NPI for RCSU services
 RCSU_RENDERING_PROGRAMS = {Program.MARYS_HOME, Program.NHCS, Program.KJLN}

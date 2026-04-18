@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from config.settings import DRY_RUN
+from config.entities import get_entity_by_npi
 from sources.claimmd_api import ClaimMDAPI, PAYER_MCO_MAP
 from lauris.billing import classify_era
 from config.models import ERA, MCO, Program
@@ -259,13 +260,8 @@ async def download_and_stage_eras() -> dict:
         mco_str = PAYER_MCO_MAP.get(payer_id, payer_name)
         mco = _parse_mco(mco_str)
 
-        program = Program.UNKNOWN
-        if npi == "1437871753":
-            program = Program.MARYS_HOME
-        elif npi == "1700297447":
-            program = Program.NHCS
-        elif npi == "1306491592":
-            program = Program.KJLN
+        entity = get_entity_by_npi(npi)
+        program = entity.program if entity else Program.UNKNOWN
 
         era_obj = ERA(
             era_id=era_id, mco=mco, program=program,

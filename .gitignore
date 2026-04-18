@@ -19,6 +19,7 @@ venv/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/cache/
 data/era_status.json
 data/last_responseid.txt
 

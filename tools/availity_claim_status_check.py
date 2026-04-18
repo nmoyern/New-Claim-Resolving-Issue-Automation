@@ -11,8 +11,8 @@ classifies each claim into one of five buckets:
     D  too_new                — A1 received only; not yet adjudicated
     E  payer_rejected         — A3/A4/A6/A7 intake rejection; 837 construction issue
 
-Each response is saved to `data/availity_responses/<timestamp>_<i>_<patient>.json`
-for offline re-analysis without burning more API calls.
+Each response is saved to the Dropbox Claim Resolution report folder for
+offline re-analysis without burning more API calls.
 
 Template for building Availity-aware routing in `decision_tree/router.py`.
 
@@ -41,14 +41,16 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+from config.entities import availity_entity_map  # noqa: E402
+from reporting.report_paths import report_type_dir, sync_report_file, unique_report_path  # noqa: E402
+
 load_dotenv(PROJECT_ROOT / ".env")
 # Also try ~/availity-test/.env for AVAILITY_PROD_* keys if they aren't in
 # the project .env yet (migration path).
 load_dotenv(Path.home() / "availity-test" / ".env", override=False)
 
 REPORT = PROJECT_ROOT / "docs" / "outstanding_claims_unified.xlsx"
-OUT_DIR = PROJECT_ROOT / "data" / "availity_responses"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = report_type_dir("Availity Claim Status")
 
 AVAILITY_BASE = "https://api.availity.com"
 # Lauris custom view "Claim_DOB__x0026__Gender_AUTOMATION" — returns
@@ -72,10 +74,8 @@ MCO_TO_PAYER = {
 
 # Lauris "Entity" → (submitter.id, NPI, providers.lastName)
 ENTITY_TO_ORG = {
-    "Mary's Home Inc.":              ("1636587", "1437871753", "MARYS HOME INC"),
-    "New Heights Community Support": ("628128",  "1700297447", "NEW HEIGHTS COMMUNITY SUPPORT"),
-    "Martinsville-NHCS":             ("628128",  "1700297447", "NEW HEIGHTS COMMUNITY SUPPORT"),
-    "KJLN Inc":                      ("977164",  "1306491592", "KJLN INC"),
+    **availity_entity_map(),
+    "Martinsville-NHCS": ("628128", "1700297447", "NEW HEIGHTS COMMUNITY SUPPORT"),
 }
 
 CATEGORY_LABEL = {
@@ -328,9 +328,13 @@ async def main():
               f"DOS {dos_str} | ${row['Outstanding']:.2f}")
 
         resp = submit_and_poll(token, payload)
-        (OUT_DIR / f"{timestamp}_{i:03d}_{info['last']}_{dos_str}.json").write_text(
-            json.dumps({"payload": payload, "response": resp}, indent=2, default=str)
+        response_path = unique_report_path(
+            "Availity Claim Status",
+            f"claim_status_{i:03d}_{info['last']}_{dos_str}",
+            ".json",
         )
+        response_path.write_text(json.dumps({"payload": payload, "response": resp}, indent=2, default=str))
+        sync_report_file(response_path, "Availity Claim Status")
 
         summary = classify(resp)
         if not summary["ok"]:
@@ -367,7 +371,7 @@ async def main():
               "D_too_new", "E_payer_rejected", "F_other", "error"]:
         if b in buckets:
             print(f"  {buckets[b]:>3}  ${dollars.get(b, 0):>11,.2f}  {labels[b]}")
-    agg_path = OUT_DIR / f"{timestamp}_rollup.json"
+    agg_path = unique_report_path("Availity Claim Status", "claim_status_rollup", ".json")
     agg_path.write_text(json.dumps(
         [{"row_member": str(r["pick"]["row"]["Member ID"]),
           "row_dos": str(r["pick"]["row"]["DOS"]),
@@ -375,6 +379,7 @@ async def main():
          for r in results],
         indent=2, default=str,
     ))
+    sync_report_file(agg_path, "Availity Claim Status")
     print(f"\nSaved: {agg_path}")
 
 

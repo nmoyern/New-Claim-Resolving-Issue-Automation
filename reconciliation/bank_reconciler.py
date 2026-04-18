@@ -26,6 +26,7 @@ import os
 from datetime import date, datetime
 from typing import List, Optional
 
+from config.entities import get_entity_by_npi
 from config.settings import DRY_RUN
 from sources.claimmd_api import ClaimMDAPI
 from reconciliation.payment_tracker import PaymentTracker
@@ -263,9 +264,5 @@ async def _process_writeoff_excel(file_path: str, tracker: PaymentTracker):
 
 
 def _npi_to_program(npi: str) -> str:
-    mapping = {
-        "1437871753": "MARYS_HOME",
-        "1700297447": "NHCS",
-        "1306491592": "KJLN",
-    }
-    return mapping.get(npi, "UNKNOWN")
+    entity = get_entity_by_npi(npi)
+    return entity.key if entity else "UNKNOWN"

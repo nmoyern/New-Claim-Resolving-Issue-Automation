@@ -15,17 +15,26 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from config.entities import KJLN, MARYS_HOME, NHCS
+
+def _load_environment_files() -> None:
+    """Load the project env first, then known local fallback env files."""
+    project_root = Path(__file__).resolve().parent.parent
+    load_dotenv(project_root / ".env")
+    load_dotenv(Path.home() / "availity-test" / ".env", override=False)
+
+
+_load_environment_files()
 
 
 # ---------------------------------------------------------------------------
 # Org constants
 # ---------------------------------------------------------------------------
-MARYS_HOME_NPI    = os.getenv("MARYS_HOME_NPI", "1437871753")
-MARYS_HOME_TAX_ID = os.getenv("MARYS_HOME_TAX_ID", "861567663")
-ORG_MARYS_HOME    = os.getenv("ORG_NAME_MARYS_HOME", "Mary's Home Inc")
-ORG_KJLN          = os.getenv("ORG_NAME_KJLN", "KJLN")
-ORG_NHCS          = os.getenv("ORG_NAME_NHCS", "NHCS")
+MARYS_HOME_NPI    = os.getenv("MARYS_HOME_NPI", MARYS_HOME.billing_npi)
+MARYS_HOME_TAX_ID = os.getenv("MARYS_HOME_TAX_ID", MARYS_HOME.tax_id)
+ORG_MARYS_HOME    = os.getenv("ORG_NAME_MARYS_HOME", MARYS_HOME.claimmd_region)
+ORG_KJLN          = os.getenv("ORG_NAME_KJLN", KJLN.claimmd_region)
+ORG_NHCS          = os.getenv("ORG_NAME_NHCS", NHCS.claimmd_region)
 
 # Rendering provider for Mary's Home Anthem claims
 DR_YANCEY_NAME = os.getenv("DR_YANCEY_NAME", "Tiffinee Yancey")

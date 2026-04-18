@@ -15,13 +15,16 @@ Join key: Billing_Summary_ID (Billing ↔ AR),
 from __future__ import annotations
 
 import os
+import json
 import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from logging_utils.logger import get_logger
+from reporting.report_paths import sync_report_file, unique_report_path
 
 logger = get_logger("lauris_xml")
 
@@ -42,15 +45,81 @@ AUTH_INFO_XML = (
     f"{BASE_URL}/reports/formsearchdataviewXML.aspx"
     "?viewid=E1jRUaNGKAxt%2bAa7Ubk1xg%3d%3d"
 )
+LAURIS_CACHE_DIR = Path("data") / "cache"
+LAURIS_CACHE_TTL_HOURS = 24
 
 
-def _fetch_xml(url: str, timeout: int = 300) -> ET.Element:
-    """Fetch and parse a Lauris XML stream via Basic Auth."""
+def _cache_path(cache_key: str) -> Path:
+    safe_key = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in cache_key)
+    return LAURIS_CACHE_DIR / f"{safe_key}.json"
+
+
+def _read_cached_xml(cache_key: str, max_age_hours: int = LAURIS_CACHE_TTL_HOURS) -> str:
+    path = _cache_path(cache_key)
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(payload.get("fetched_at", ""))
+        if datetime.now() - fetched_at > timedelta(hours=max_age_hours):
+            return ""
+        content = str(payload.get("content", "") or "")
+        if content.strip():
+            logger.info("Using cached Lauris XML", cache_key=cache_key, path=str(path))
+            return content
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Ignoring invalid Lauris cache file", cache_key=cache_key, error=str(exc))
+    return ""
+
+
+def _write_cached_xml(cache_key: str, content: str) -> None:
+    path = _cache_path(cache_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "fetched_at": datetime.now().isoformat(),
+        "content": content,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def fetch_xml_text(
+    url: str,
+    *,
+    cache_key: str,
+    timeout: int = 300,
+    max_age_hours: int = LAURIS_CACHE_TTL_HOURS,
+) -> str:
+    """Fetch Lauris XML via Basic Auth and cache the raw response for 24 hours."""
+    cached = _read_cached_xml(cache_key, max_age_hours=max_age_hours)
+    if cached:
+        return cached
+
     r = requests.get(url, auth=(USERNAME, PASSWORD), timeout=timeout)
     r.raise_for_status()
-    if not r.text.strip():
+    content = r.text
+    if not content.strip():
         raise ValueError(f"Empty response from {url}")
-    return ET.fromstring(r.text)
+    _write_cached_xml(cache_key, content)
+    logger.info("Cached Lauris XML", cache_key=cache_key, path=str(_cache_path(cache_key)))
+    return content
+
+
+def _fetch_xml(
+    url: str,
+    timeout: int = 300,
+    *,
+    cache_key: str,
+    max_age_hours: int = LAURIS_CACHE_TTL_HOURS,
+) -> ET.Element:
+    """Fetch and parse a Lauris XML stream via Basic Auth with 24-hour disk cache."""
+    return ET.fromstring(
+        fetch_xml_text(
+            url,
+            cache_key=cache_key,
+            timeout=timeout,
+            max_age_hours=max_age_hours,
+        )
+    )
 
 
 def fetch_outstanding_claims(
@@ -66,7 +135,7 @@ def fetch_outstanding_claims(
 
     # 1. Billing Summary
     logger.info("Fetching Lauris Billing Summary XML...")
-    bs_root = _fetch_xml(BILLING_SUMMARY_XML)
+    bs_root = _fetch_xml(BILLING_SUMMARY_XML, cache_key="lauris_billing_summary")
     billing: Dict[str, dict] = {}
     for row in bs_root.findall(".//Billing_Summary_View"):
         bs_id = (row.findtext("Billing_Summary_ID") or "").strip()
@@ -120,7 +189,7 @@ def fetch_outstanding_claims(
 
     # 2. AR Information (payments)
     logger.info("Fetching Lauris AR Information XML...")
-    ar_root = _fetch_xml(AR_INFO_XML)
+    ar_root = _fetch_xml(AR_INFO_XML, cache_key="lauris_ar_information")
     for row in ar_root.findall(".//AR_Information_View"):
         bs_id = (
             row.findtext("Billing_Summary_ID") or ""
@@ -141,7 +210,7 @@ def fetch_outstanding_claims(
 
     # 3. Authorization Information
     logger.info("Fetching Lauris Authorization XML...")
-    auth_root = _fetch_xml(AUTH_INFO_XML)
+    auth_root = _fetch_xml(AUTH_INFO_XML, cache_key="lauris_authorization")
     auth_by_join = {}
     for row in auth_root.findall(
         ".//Authorization_Information_View"
@@ -223,6 +292,114 @@ def fetch_outstanding_claims(
     )
 
     return results
+
+
+def fetch_billing_bridge(lookback_days: int = 365) -> list[dict]:
+    """
+    Fetch the Billing Summary bridge rows used to map Claim.MD claims to Lauris.
+
+    This is lighter than the full outstanding-claims join when code only needs:
+      - Billing_Summary_ID
+      - STBID / patient account number
+      - Key / Unique_ID
+      - Name
+      - Document_Date
+      - AuthID
+    """
+    cutoff = (datetime.now() - timedelta(days=lookback_days)).isoformat()
+    logger.info("Fetching Lauris Billing Summary bridge XML...")
+    root = _fetch_xml(BILLING_SUMMARY_XML, cache_key="lauris_billing_summary")
+    rows: list[dict] = []
+    for row in root.findall(".//Billing_Summary_View"):
+        bs_id = (row.findtext("Billing_Summary_ID") or "").strip()
+        doc_date = (row.findtext("Document_Date") or "").strip()
+        if not bs_id or (doc_date and doc_date < cutoff):
+            continue
+        rows.append({
+            "bs_id": bs_id,
+            "patient_account_number": (row.findtext("STBID") or "").strip(),
+            "lauris_id": (row.findtext("Key") or "").strip(),
+            "name": (row.findtext("Name") or "").strip(),
+            "auth_id": (
+                row.findtext("AuthID__x0028_for_joining_x0029_") or ""
+            ).strip(),
+            "doc_date": doc_date[:10],
+        })
+    logger.info("Billing bridge rows loaded", count=len(rows))
+    return rows
+
+
+def fetch_claim_member_bridge(lookback_days: int = 365) -> list[dict]:
+    """
+    Fetch Lauris claim bridge rows keyed the same way Claim.MD claims are matched.
+
+    The reliable join from Claim.MD into Lauris is:
+      Claim.client_id / ins_number  -> Lauris auth Insurance_Policy_No
+      Claim.dos                     -> Lauris Billing Summary Document_Date
+
+    This helper returns joined billing+auth rows with the pieces needed to
+    resolve demographics and authorization details before payer API calls.
+    """
+    cutoff = (datetime.now() - timedelta(days=lookback_days)).isoformat()
+
+    logger.info("Fetching Lauris Billing Summary XML for claim member bridge...")
+    billing_root = _fetch_xml(BILLING_SUMMARY_XML, cache_key="lauris_billing_summary")
+    logger.info("Fetching Lauris Authorization XML for claim member bridge...")
+    auth_root = _fetch_xml(AUTH_INFO_XML, cache_key="lauris_authorization")
+
+    auth_by_join: dict[str, dict[str, str]] = {}
+    for row in auth_root.findall(".//Authorization_Information_View"):
+        join_id = (
+            row.findtext("AuthID__x0028_for_joining_x0029_")
+            or ""
+        ).strip()
+        if not join_id:
+            continue
+        auth_by_join[join_id] = {
+            "auth_number": (row.findtext("Authorization_Number") or "").strip(),
+            "auth_status": (row.findtext("Authorization_Status") or "").strip(),
+            "auth_start": (row.findtext("Start_Date") or "").strip()[:10],
+            "auth_end": (row.findtext("End_Date") or "").strip()[:10],
+            "member_id": (row.findtext("Insurance_Policy_No") or "").strip(),
+            "mco": (row.findtext("Payor") or "").strip(),
+            "billing_diagnosis": (row.findtext("Billing_Diagnosis") or "").strip(),
+        }
+
+    rows: list[dict] = []
+    for row in billing_root.findall(".//Billing_Summary_View"):
+        bs_id = (row.findtext("Billing_Summary_ID") or "").strip()
+        doc_date = (row.findtext("Document_Date") or "").strip()
+        if not bs_id or (doc_date and doc_date < cutoff):
+            continue
+
+        auth_id = (
+            row.findtext("AuthID__x0028_for_joining_x0029_")
+            or ""
+        ).strip()
+        auth = auth_by_join.get(auth_id, {})
+        rows.append({
+            "bs_id": bs_id,
+            "patient_account_number": (row.findtext("STBID") or "").strip(),
+            "lauris_id": (row.findtext("Key") or "").strip(),
+            "key": (row.findtext("Key") or "").strip(),
+            "name": (row.findtext("Name") or "").strip(),
+            "auth_id": auth_id,
+            "doc_date": doc_date[:10],
+            "member_id": auth.get("member_id", ""),
+            "mco": auth.get("mco", ""),
+            "auth_number": auth.get("auth_number", ""),
+            "auth_status": auth.get("auth_status", ""),
+            "auth_start": auth.get("auth_start", ""),
+            "auth_end": auth.get("auth_end", ""),
+            "billing_diagnosis": auth.get("billing_diagnosis", ""),
+            "service": (row.findtext("Service_Name") or "").strip(),
+            "billing_amount": float(row.findtext("Billing_Amount") or "0"),
+            "billing_units": (row.findtext("Billing_Units") or "").strip(),
+            "modifier": (row.findtext("Billing_Modifier") or "").strip(),
+        })
+
+    logger.info("Claim member bridge rows loaded", count=len(rows))
+    return rows
 
 
 def enrich_with_claimmd_notes(
@@ -360,7 +537,7 @@ def is_claim_in_ar(
 
 def generate_unified_excel(
     claims: List[dict],
-    output_path: str = "docs/outstanding_claims_unified.xlsx",
+    output_path: str | None = None,
 ) -> str:
     """Generate the unified outstanding claims Excel report."""
     from openpyxl import Workbook
@@ -368,6 +545,15 @@ def generate_unified_excel(
         Font, PatternFill, Border, Side, Alignment,
     )
     from openpyxl.utils import get_column_letter
+
+    if output_path is None:
+        output_path = str(
+            unique_report_path(
+                "Unified Outstanding Claims",
+                "outstanding_claims_unified",
+                ".xlsx",
+            )
+        )
 
     wb = Workbook()
     ws = wb.active
@@ -447,6 +633,7 @@ def generate_unified_excel(
         f"{len(claims) + 1}"
     )
     wb.save(output_path)
+    sync_report_file(Path(output_path), "Unified Outstanding Claims")
     logger.info(
         "Unified report saved",
         path=output_path,

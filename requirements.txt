@@ -6,6 +6,7 @@ google-auth-httplib2>=0.2.0
 google-api-python-client>=2.111.0
 gspread>=6.0.0
 python-dotenv>=1.0.0
+requests>=2.31.0
 APScheduler>=3.10.4
 aiofiles>=23.2.1
 structlog>=24.1.0

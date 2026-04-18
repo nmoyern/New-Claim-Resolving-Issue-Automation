@@ -30,6 +30,7 @@ class HumanReviewQueue:
             "client_name": result.claim.client_name,
             "mco":         result.claim.mco.value,
             "dos":         str(result.claim.dos),
+            "denial_codes": [code.value for code in result.claim.denial_codes],
             "action":      result.action_taken.value,
             "reason":      result.human_reason,
             "timestamp":   result.timestamp.isoformat(),
@@ -51,7 +52,9 @@ class HumanReviewQueue:
         lines = [f"🔍 Human Review Queue — {date.today().strftime('%m/%d/%y')} ({len(self._queue)} items):"]
         for item in self._queue[:10]:  # Cap at 10 to keep comment readable
             lines.append(
-                f"  • Claim {item['claim_id']} ({item['client_name']}, {item['mco']}): {item['reason'][:80]}"
+                f"  • Claim {item['claim_id']} ({item['client_name']}, {item['mco']}, "
+                f"DOS {item['dos']}, Denials: {', '.join(item.get('denial_codes', [])) or 'none'}): "
+                f"{item['reason'][:80]}"
             )
         if len(self._queue) > 10:
             lines.append(f"  ... and {len(self._queue) - 10} more. See {QUEUE_FILE.name}")

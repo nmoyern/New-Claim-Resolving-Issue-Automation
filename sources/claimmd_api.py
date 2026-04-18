@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from config.entities import get_entity_by_npi
 from config.models import Claim, ClaimStatus, DenialCode, MCO, Program
 from config.settings import DRY_RUN
 from sources.claimmd import parse_denial_codes, _parse_mco, _parse_date
@@ -168,7 +169,10 @@ class ClaimMDAPI:
     # ------------------------------------------------------------------
 
     async def get_claim_responses(
-        self, response_id: str = "0", claim_id: str = ""
+        self,
+        response_id: str = "0",
+        claim_id: str = "",
+        save_cursor: bool = True,
     ) -> List[dict]:
         """
         Get claim status updates (denials, rejections, acceptances).
@@ -184,7 +188,7 @@ class ClaimMDAPI:
         last_id = result.get("last_responseid", "0")
 
         # Save last response ID so next run only fetches new updates
-        if last_id and last_id != "0":
+        if save_cursor and last_id and last_id != "0":
             self._save_last_response_id(last_id)
 
         logger.info(
@@ -194,7 +198,11 @@ class ClaimMDAPI:
         )
         return claims
 
-    async def get_denied_claims(self, full_pull: bool = False) -> List[Claim]:
+    async def get_denied_claims(
+        self,
+        full_pull: bool = False,
+        save_cursor: bool = True,
+    ) -> List[Claim]:
         """
         Pull denied/rejected claims and convert to Claim objects.
 
@@ -209,7 +217,10 @@ class ClaimMDAPI:
             response_id = self._load_last_response_id()
             logger.info("Fetching claims since response ID", response_id=response_id)
 
-        raw_claims = await self.get_claim_responses(response_id=response_id)
+        raw_claims = await self.get_claim_responses(
+            response_id=response_id,
+            save_cursor=save_cursor,
+        )
 
         # Save the last response ID for next run
         if raw_claims:
@@ -401,16 +412,11 @@ class ClaimMDAPI:
 
         age_days = (date.today() - fdos).days if fdos else 0
 
-        # Infer program from NPI
-        program = Program.UNKNOWN
-        if bill_npi == "1437871753":
-            program = Program.MARYS_HOME
-        elif bill_npi == "1700297447":
-            program = Program.NHCS
-        elif bill_npi == "1306491592":
-            program = Program.KJLN
+        # Infer program from billing NPI
+        entity = get_entity_by_npi(bill_npi)
+        program = entity.program if entity else Program.UNKNOWN
 
-        return Claim(
+        claim = Claim(
             claim_id=claim_id,
             client_name=patient_name if patient_name else pcn,
             client_id=ins_number,
@@ -429,6 +435,8 @@ class ClaimMDAPI:
             units=units,
             claimmd_url=f"https://www.claim.md/monitor.plx?l=claim&id={claim_id}",
         )
+        claim.patient_account_number = pcn
+        return claim
 
     # ------------------------------------------------------------------
     # ERA operations

@@ -462,8 +462,8 @@ These run BEFORE claims are submitted to Claim.MD for the first time, via `run_p
 ### Check 6: NPI (`_check_npi`)
 
 **What it checks**: Is the billing NPI correct for the entity? Uses `ENTITY_NPI_MAP`:
-- NHCS: 1588094513
-- KJLN: 1235723785
+- NHCS: 1700297447
+- KJLN: 1306491592
 - MARYS_HOME: from settings
 
 **Auto-fix**: Sets NPI to the correct entity NPI.

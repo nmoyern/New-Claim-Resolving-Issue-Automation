@@ -28,10 +28,10 @@ from sources.browser_base import BrowserSession
 from sources.claimmd import SELECTORS as CLAIMMD_SELECTORS
 from config.settings import get_credentials
 from logging_utils.logger import get_logger, setup_logging
+from reporting.report_paths import report_type_dir, sync_report_file, unique_report_path
 
 logger = get_logger("selector_audit")
-REPORT_DIR = Path("/tmp/claims_selector_audit")
-REPORT_DIR.mkdir(parents=True, exist_ok=True)
+REPORT_DIR = report_type_dir("Selector Audit")
 
 
 @dataclass
@@ -77,7 +77,13 @@ class AuditReport:
         print(f"{'='*60}\n")
 
     def save(self) -> str:
-        path = str(REPORT_DIR / f"audit_{self.portal}_{self.run_date}.json")
+        path = str(
+            unique_report_path(
+                "Selector Audit",
+                f"audit_{self.portal}",
+                ".json",
+            )
+        )
         data = {
             "portal":     self.portal,
             "run_date":   self.run_date,
@@ -97,6 +103,7 @@ class AuditReport:
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+        sync_report_file(Path(path), "Selector Audit")
         print(f"  Report saved: {path}")
         return path
 

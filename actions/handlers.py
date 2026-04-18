@@ -23,6 +23,7 @@ from config.models import (
     ResolutionAction,
     ResolutionResult,
 )
+from config.entities import get_entity_by_npi, get_entity_by_program
 from config.settings import DRY_RUN, ORG_KJLN, ORG_NHCS, ORG_MARYS_HOME, DR_YANCEY_NPI
 
 
@@ -209,13 +210,8 @@ async def handle_era_upload(eras: List[ERA]) -> ResolutionResult:
             amount = float(era_info.get("paid_amount", "0") or "0")
 
             # Infer program from NPI
-            program = Program.UNKNOWN
-            if npi == "1437871753":
-                program = Program.MARYS_HOME
-            elif npi == "1700297447":
-                program = Program.NHCS
-            elif npi == "1306491592":
-                program = Program.KJLN
+            entity = get_entity_by_npi(npi)
+            program = entity.program if entity else Program.UNKNOWN
 
             # Infer MCO from payer
             from sources.claimmd_api import PAYER_MCO_MAP
@@ -451,13 +447,16 @@ async def handle_correct_and_resubmit(claim: Claim) -> ResolutionResult:
         if api_elig.key:
             try:
                 name_parts = claim.client_name.split()
+                entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
+                provider_npi = entity.billing_npi if entity else claim.npi
+                provider_taxid = entity.tax_id if entity else ""
                 elig = await api_elig.check_eligibility(
                     member_last=name_parts[-1],
                     member_first=name_parts[0],
                     payer_id=claim.mco.value if claim.mco.value != "unknown" else "",
                     service_date=claim.dos.strftime("%Y%m%d"),
-                    provider_npi=claim.npi or "1437871753",
-                    provider_taxid="861567663",
+                    provider_npi=provider_npi,
+                    provider_taxid=provider_taxid,
                     member_id=claim.client_id,
                 )
                 if elig and not elig.get("error"):
@@ -690,13 +689,16 @@ async def handle_coverage_terminated(claim: Claim) -> ResolutionResult:
     if api.key and claim.client_name:
         name_parts = claim.client_name.split()
         if len(name_parts) >= 2:
+            entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
+            provider_npi = entity.billing_npi if entity else claim.npi
+            provider_taxid = entity.tax_id if entity else ""
             elig = await api.check_eligibility(
                 member_last=name_parts[-1],
                 member_first=name_parts[0],
                 payer_id=claim.mco.value if claim.mco.value != "unknown" else "",
                 service_date=claim.dos.strftime("%Y%m%d"),
-                provider_npi=claim.npi or "1437871753",
-                provider_taxid="861567663",
+                provider_npi=provider_npi,
+                provider_taxid=provider_taxid,
                 member_id=claim.client_id,
             )
 
@@ -942,13 +944,11 @@ async def _determine_entity_or_clickup(claim: Claim) -> str:
 
 async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     """
-    Auth verification cascade:
-      Step 1: Check Lauris Authorization (authmanage.aspx grid)
-      Step 2: MCO portal check
-      Step 3: Fax log check
-      Step 4: Dropbox check
-      Step 5: Fax verify (Lauris live fax records)
-      Step 6: ClickUp (auth never submitted)
+    Auth verification for the narrowed rejected/denied claim workflow.
+
+    This handler no longer checks fax logs, Dropbox folders, Lauris fax
+    records, or Nextiva. If an auth is not found through the configured payer
+    access path, the claim stops for human review.
     """
     if await _is_claim_already_resolved(claim.claim_id):
         return ResolutionResult(
@@ -956,6 +956,19 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             note_written="Skipped — claim already accepted/paid",
         )
     logger.info("Handling MCO auth check", claim_id=claim.claim_id, mco=claim.mco.value)
+
+    return ResolutionResult(
+        claim=claim,
+        action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+        success=False,
+        needs_human=True,
+        human_reason=(
+            "Claim needs auth follow-up. This narrowed automation only uses "
+            "Optum for United and Availity for other MCO claim-status checks; "
+            "provider portal, Lauris auth-page, fax, refax, and Dropbox lookup "
+            "workflows are disabled here."
+        ),
+    )
 
     # -----------------------------------------------------------------------
     # Step 1: Check Lauris Authorization Management page
@@ -1263,99 +1276,17 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 note_written=f"{note} Corrected and resubmitted (auth added). Recon if re-denied.",
             )
 
-    else:
-        # Auth NOT found in portal → cascade: fax_log → live scrape → Dropbox → ClickUp
-        # Step 1: Fast fax_log lookup (database, no scraping)
-        try:
-            from actions.fax_tracker import check_fax_log_for_auth
-            fax_result = await check_fax_log_for_auth(
-                client_name=claim.client_name,
-                mco=claim.mco.value,
-                claim_dos=claim.dos,
-                auto_refresh=True,  # triggers live scrape if nothing found
-            )
-
-            # If we found an approved auth via received fax
-            if fax_result.get("auth_approved") and fax_result.get("auth_number"):
-                claim.auth_number = fax_result["auth_number"]
-                note = (
-                    f"Auth not in {claim.mco.value} portal but approval found "
-                    f"in received fax log (auth #{fax_result['auth_number']}). "
-                    f"Correcting claim and resubmitting."
-                )
-                api = ClaimMDAPI()
-                if api.key:
-                    corrections = {"auth_number": fax_result["auth_number"]}
-                    await api.modify_claim(claim.claim_id, corrections)
-                    from notes.formatter import format_note
-                    await api.add_claim_note(claim.claim_id, format_note(note))
-                return ResolutionResult(
-                    claim=claim,
-                    action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-                    success=True,
-                    note_written=note,
-                )
-
-            # If we found the auth was sent (fax confirmation exists)
-            if fax_result.get("sent_found"):
-                sent_entry = fax_result["sent_entries"][0]
-                sent_date_str = sent_entry.get("fax_date", "")
-                logger.info(
-                    "Fax log confirms auth was sent",
-                    client=claim.client_name,
-                    sent_date=sent_date_str,
-                    source=sent_entry.get("source", ""),
-                )
-                # If auth was rejected via fax, flag for human review
-                if fax_result.get("auth_rejected"):
-                    return ResolutionResult(
-                        claim=claim,
-                        action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-                        success=False,
-                        needs_human=True,
-                        human_reason=(
-                            f"Auth fax was sent ({sent_date_str}) but rejection "
-                            f"found in received fax log. "
-                            f"Manual review needed — may need new auth submission."
-                        ),
-                    )
-                # Auth was sent but no response — proceed to refax
-                # (falls through to Dropbox check, then Lauris fax verify)
-
-        except Exception as e:
-            logger.warning("Fax log lookup failed", error=str(e))
-
-        # Step 2: Check Dropbox for saved confirmation
-        try:
-            from actions.dropbox_verify import verify_dropbox_auth
-            dropbox_result = await verify_dropbox_auth(
-                claim.client_name, claim.mco.value, claim.claim_id
-            )
-            if dropbox_result.get("found"):
-                # Dropbox has the confirmation — submit recon with it
-                api = ClaimMDAPI()
-                note = (
-                    f"Auth not in {claim.mco.value} portal. "
-                    f"Submission verified via Dropbox at {dropbox_result['path']}. "
-                    f"Reconsideration submitted."
-                )
-                from notes.formatter import format_note
-                if api.key:
-                    await api.add_claim_note(claim.claim_id, format_note(note))
-                    await api.submit_appeal(claim.claim_id, {
-                        "AppealType": "reconsideration",
-                    })
-                return ResolutionResult(
-                    claim=claim,
-                    action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-                    success=True,
-                    note_written=note,
-                )
-        except Exception as e:
-            logger.warning("Dropbox verify failed", error=str(e))
-
-        # Step 3: Not in fax_log or Dropbox → check live Lauris fax records
-        return await handle_lauris_fax_verify(claim, auth_not_found=True)
+    return ResolutionResult(
+        claim=claim,
+        action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+        success=False,
+        needs_human=True,
+        human_reason=(
+            f"Auth not confirmed through payer access for {claim.mco.value}. "
+            "Fax, refax, Dropbox, and Lauris fax checks are disabled in this "
+            "new narrowed workflow."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
