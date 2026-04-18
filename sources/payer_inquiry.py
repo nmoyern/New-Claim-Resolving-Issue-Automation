@@ -27,6 +27,7 @@ logger = get_logger("payer_inquiry")
 OPTUM_PAYER_ID = "87726"
 
 AVAILITY_PAYER_IDS = {
+    MCO.UNITED: "87726",
     MCO.SENTARA: "54154",
     MCO.AETNA: "ABHVA",
     MCO.ANTHEM: "423",
@@ -75,9 +76,48 @@ def is_billed_rejected_or_denied(claim: Claim) -> bool:
 
 
 async def check_payer_claim_status(claim: Claim) -> PayerInquiryResult:
-    """Route the claim to the payer API requested for this new automation."""
+    """Route the claim to the payer API requested for this new automation.
+
+    For United claims, Optum is checked first. If Optum says 'paid' but the
+    paid amount doesn't match the billed amount, Availity is checked as a
+    second opinion — Availity matches on the exact PCN/claim control number
+    and may reveal the specific line was actually denied.
+    """
     if claim.mco == MCO.UNITED:
-        return await OptumClaimInquiryClient().check_claim(claim)
+        optum_result = await OptumClaimInquiryClient().check_claim(claim)
+
+        # Cross-check: if Optum says paid but amount doesn't match billed,
+        # verify with Availity which matches on the exact PCN
+        if (
+            optum_result.bucket == "paid_at_payer"
+            and claim.billed_amount > 0
+            and abs(optum_result.paid_amount - claim.billed_amount) > 0.01
+        ):
+            logger.info(
+                "Optum paid amount mismatch — cross-checking with Availity",
+                claim_id=claim.claim_id,
+                billed=claim.billed_amount,
+                optum_paid=optum_result.paid_amount,
+            )
+            availity_result = await AvailityClaimStatusClient().check_claim(claim)
+            if availity_result.ok and availity_result.bucket in (
+                "real_denial", "payer_rejected", "payer_no_record",
+            ):
+                logger.info(
+                    "Availity contradicts Optum — claim is denied",
+                    claim_id=claim.claim_id,
+                    optum_bucket=optum_result.bucket,
+                    availity_bucket=availity_result.bucket,
+                )
+                availity_result.reason = (
+                    f"{availity_result.reason} "
+                    f"(Optum showed paid ${optum_result.paid_amount:,.2f} "
+                    f"but billed was ${claim.billed_amount:,.2f} — "
+                    f"Availity confirms this specific claim line was denied.)"
+                )
+                return availity_result
+
+        return optum_result
     return await AvailityClaimStatusClient().check_claim(claim)
 
 
