@@ -392,7 +392,66 @@ class AvailityClaimStatusClient:
             payload["patient.genderCode"] = gender_code
         payload["patient.subscriberRelationshipCode"] = "18"
         raw = await self._submit_and_poll(token, payload)
-        return self._classify(raw)
+        result = self._classify(raw)
+
+        # If the primary entity shows denial/no-record, check other LCI entities
+        # — the payer may have processed the claim under a sibling entity's NPI.
+        if result.bucket in ("real_denial", "payer_no_record", "payer_rejected"):
+            alt_result = await self._check_sibling_entities(
+                claim, token, payer_id, entity, first, last, dob, gender_code,
+            )
+            if alt_result:
+                return alt_result
+
+        return result
+
+    async def _check_sibling_entities(
+        self, claim, token, payer_id, primary_entity, first, last, dob, gender_code,
+    ) -> PayerInquiryResult | None:
+        """Try other LCI entities when the primary one shows denial."""
+        from config.entities import get_all_entities
+
+        for alt in get_all_entities():
+            if alt is primary_entity:
+                continue
+            payload = {
+                "payer.id": payer_id,
+                "submitter.lastName": "LIFECONSULTANTS",
+                "submitter.id": alt.availity_submitter_id,
+                "providers.npi": alt.billing_npi,
+                "providers.lastName": alt.availity_provider_name,
+                "subscriber.memberId": claim.client_id,
+                "fromDate": _ymd(claim.dos),
+                "toDate": _ymd(claim.dos),
+                "patient.subscriberRelationshipCode": "18",
+            }
+            if first:
+                payload["subscriber.firstName"] = first
+                payload["patient.firstName"] = first
+            if last:
+                payload["subscriber.lastName"] = last
+                payload["patient.lastName"] = last
+            if dob:
+                payload["patient.birthDate"] = dob
+            if gender_code:
+                payload["patient.genderCode"] = gender_code
+
+            raw = await self._submit_and_poll(token, payload)
+            alt_result = self._classify(raw)
+            if alt_result.bucket == "paid_at_payer":
+                logger.info(
+                    "Claim paid under sibling entity",
+                    claim_id=claim.claim_id,
+                    billed_entity=primary_entity.key if primary_entity else claim.npi,
+                    paid_entity=alt.key,
+                    paid_amount=alt_result.paid_amount,
+                )
+                alt_result.reason = (
+                    f"{alt_result.reason} "
+                    f"(Paid to {alt.display_name}, not {primary_entity.display_name if primary_entity else 'unknown'}.)"
+                )
+                return alt_result
+        return None
 
     async def _token_value(self) -> str:
         body = urlencode({
