@@ -65,6 +65,7 @@ from reporting.self_learning import (
     generate_self_learning_report,
     email_report,
 )
+from actions.company_auth_match import classify_with_payer_lookup
 from actions.era_manager import download_and_stage_eras
 from actions.era_poster import post_pending_eras
 from actions.pre_billing_check import run_pre_billing_checks
@@ -347,7 +348,44 @@ async def run_daily(
             _log_to_sheets(claim, result)
             continue
 
-        action, reason = router.route(claim)
+        # ---- Entity/auth classification ----
+        # Before routing, check whether the authorization is under a
+        # different LCI entity than the one that billed.  If so, override
+        # the router action to fix the billing entity and resubmit.
+        try:
+            auth_match = await classify_with_payer_lookup(claim)
+            logger.info(
+                "Entity/auth check",
+                claim_id=claim.claim_id,
+                status=auth_match.status,
+                action=auth_match.recommended_action,
+            )
+            if auth_match.should_update_claim:
+                # Auth is under a different entity — apply correct fields
+                for field_name, value in auth_match.fields_to_change.items():
+                    setattr(claim, field_name, value)
+                logger.info(
+                    "Entity mismatch — overriding to LAURIS_FIX_COMPANY",
+                    claim_id=claim.claim_id,
+                    current=auth_match.current_entity.display_name if auth_match.current_entity else "unknown",
+                    correct=auth_match.matched_entities[0].entity.display_name,
+                    fields=auth_match.fields_to_change,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Entity/auth classification failed — falling through to router",
+                claim_id=claim.claim_id,
+                error=str(exc),
+            )
+            auth_match = None
+
+        # Route the claim — entity/auth mismatch overrides the router
+        if auth_match and auth_match.should_update_claim:
+            action = ResolutionAction.LAURIS_FIX_COMPANY
+            reason = auth_match.reason
+        else:
+            action, reason = router.route(claim)
+
         if needs_authorization_before_resubmission(claim):
             missing_auth_claims.append(claim)
 
