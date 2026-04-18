@@ -22,7 +22,7 @@ logger = get_logger("lauris_demographics")
 
 LAURIS_DEMOGRAPHICS_URL = (
     "https://www12.laurisonline.com/reports/formsearchdataviewXML.aspx"
-    "?viewid=sJW17xYGLrrCB7izAXPf4Q%3d%3d"
+    "?viewid=kxU36SOm4id%2bLc0hAh6YSQ%3d%3d"
 )
 
 
@@ -52,12 +52,12 @@ def fetch_lauris_demographics() -> dict[str, LaurisDemographics]:
 
     response_text = fetch_xml_text(
         LAURIS_DEMOGRAPHICS_URL,
-        cache_key="lauris_claim_dob_gender",
+        cache_key="lauris_claim_dob_gender_v2",
         timeout=300,
     )
     root = ET.fromstring(response_text)
     out: dict[str, LaurisDemographics] = {}
-    for row in root.findall("Claim_DOB__x0026__Gender_AUTOMATION"):
+    for row in root.findall("Claim_V2_Gender__x0026__DOB1"):
         uid = (row.findtext("Unique_ID") or "").strip()
         dob = _normalize_dob((row.findtext("DOB") or "").strip())
         if not (uid and dob):
