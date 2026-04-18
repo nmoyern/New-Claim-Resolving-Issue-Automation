@@ -325,7 +325,38 @@ async def run_daily(
     # -------------------------------------------------------
     processed = 0
     missing_auth_claims: List[Claim] = []
+    claimmd_api = ClaimMDAPI()
     for claim in claims[:max_claims]:
+
+        # ---- Check Claim.MD staff notes before doing anything ----
+        try:
+            prior_notes = await claimmd_api.get_claim_notes(claim.claim_id)
+            staff_resolution = _check_notes_for_prior_resolution(prior_notes)
+            if staff_resolution:
+                logger.info(
+                    "Skipping — staff already resolved",
+                    claim_id=claim.claim_id,
+                    client=claim.client_name,
+                    resolution=staff_resolution,
+                )
+                result = ResolutionResult(
+                    claim=claim,
+                    action_taken=ResolutionAction.SKIP,
+                    success=True,
+                    note_written=f"Skipped — staff note: {staff_resolution}",
+                )
+                summary.claims_completed += 1
+                summary.results.append(result)
+                _log_to_sheets(claim, result)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not fetch Claim.MD notes — proceeding anyway",
+                claim_id=claim.claim_id,
+                error=str(exc),
+            )
+            prior_notes = []
+
         payer_result = await check_payer_claim_status(claim)
         logger.info(
             "Payer API check complete",
@@ -567,6 +598,39 @@ def _denial_to_gap_category(claim: Claim):
         DenialCode.EXCEEDED_UNITS: GapCategory.AUTH_NOT_ENTERED_LAURIS,
     }
     return mapping.get(code, GapCategory.UNKNOWN)
+
+
+_RESOLUTION_KEYWORDS = [
+    ("write off", "written off"),
+    ("rebilled", "rebilled"),
+    ("appeal submitted", "appeal in progress"),
+    ("reconsideration submitted", "reconsideration in progress"),
+    ("claim archived", "archived"),
+    ("self pay", "self-pay — should not have been billed"),
+    ("just billed", "recently rebilled"),
+]
+
+
+def _check_notes_for_prior_resolution(notes: List[dict]) -> str:
+    """
+    Check Claim.MD notes for evidence that staff already resolved this claim.
+
+    Returns a short description of the resolution if found, or empty string.
+    Only considers the most recent note to avoid false positives from old notes
+    that were superseded by later activity.
+    """
+    if not notes:
+        return ""
+    # Notes come sorted chronologically; take the most recent
+    latest = notes[-1]
+    text = str(latest.get("note", "")).strip().lower()
+    user = str(latest.get("username", "")).strip()
+    dt = str(latest.get("date_time", ""))[:16]
+
+    for keyword, description in _RESOLUTION_KEYWORDS:
+        if keyword in text:
+            return f"{description} (by {user} on {dt})"
+    return ""
 
 
 def _log_to_sheets(claim: Claim, result: ResolutionResult):
