@@ -600,15 +600,32 @@ def _denial_to_gap_category(claim: Claim):
     return mapping.get(code, GapCategory.UNKNOWN)
 
 
+# (keyword, description, max_age_days or None for permanent)
 _RESOLUTION_KEYWORDS = [
-    ("write off", "written off"),
-    ("rebilled", "rebilled"),
-    ("appeal submitted", "appeal in progress"),
-    ("reconsideration submitted", "reconsideration in progress"),
-    ("claim archived", "archived"),
-    ("self pay", "self-pay — should not have been billed"),
-    ("just billed", "recently rebilled"),
+    ("write off", "written off", None),
+    ("rebilled", "rebilled", None),
+    ("appeal submitted", "appeal in progress", 30),
+    ("reconsideration submitted", "reconsideration in progress", 30),
+    ("claim archived", "archived", None),
+    ("self pay", "self-pay — should not have been billed", None),
+    ("just billed", "recently rebilled", None),
 ]
+
+
+def _parse_note_date(dt_str: str) -> date | None:
+    """Parse Claim.MD note datetime like '2025-11-15 10:19:16am' to date."""
+    from datetime import datetime
+    raw = str(dt_str or "").strip()
+    for fmt in ("%Y-%m-%d %I:%M:%S%p", "%Y-%m-%d %I:%M:%S %p", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw[:19], fmt).date()
+        except ValueError:
+            continue
+    # Try just the date portion
+    try:
+        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _check_notes_for_prior_resolution(notes: List[dict]) -> str:
@@ -618,6 +635,10 @@ def _check_notes_for_prior_resolution(notes: List[dict]) -> str:
     Returns a short description of the resolution if found, or empty string.
     Only considers the most recent note to avoid false positives from old notes
     that were superseded by later activity.
+
+    Time-limited resolutions (appeals, reconsiderations) expire after 30 days
+    from the note date — if the payer hasn't responded by then, the claim
+    should be followed up on again.
     """
     if not notes:
         return ""
@@ -627,8 +648,14 @@ def _check_notes_for_prior_resolution(notes: List[dict]) -> str:
     user = str(latest.get("username", "")).strip()
     dt = str(latest.get("date_time", ""))[:16]
 
-    for keyword, description in _RESOLUTION_KEYWORDS:
+    for keyword, description, max_age_days in _RESOLUTION_KEYWORDS:
         if keyword in text:
+            if max_age_days is not None:
+                note_date = _parse_note_date(latest.get("date_time", ""))
+                if note_date:
+                    age = (date.today() - note_date).days
+                    if age > max_age_days:
+                        return ""  # Expired — proceed with claim
             return f"{description} (by {user} on {dt})"
     return ""
 
