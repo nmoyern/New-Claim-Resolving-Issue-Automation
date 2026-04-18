@@ -83,13 +83,25 @@ async def check_payer_claim_status(claim: Claim) -> PayerInquiryResult:
 
 async def ensure_claim_patient_identity(claim: Claim) -> Claim:
     """
-    Fill missing patient DOB from Claim.MD eligibility when Lauris demographics
-    did not provide it but we do have a usable patient name and member ID.
+    Fill missing patient name, DOB, and gender from Claim.MD eligibility.
+
+    Handles two cases:
+    1. Lauris matched but DOB/Gender view was missing the patient
+    2. Lauris didn't match at all — client_name is a fake PCN like CW4178-1181497
+
+    In case 2, the eligibility call uses just member_id (no name required
+    for most payers) and recovers the real patient name along with DOB/gender.
     """
-    if _claim_dob(claim):
-        return claim
+    name_is_pcn = _looks_like_pcn(claim.client_name)
+    has_dob = bool(_claim_dob(claim))
     first, last = _claim_name_parts(claim)
-    if not (first and last and claim.client_id and claim.mco != MCO.UNKNOWN):
+    has_name = bool(first and last)
+
+    # Nothing to recover if we already have name + DOB
+    if has_dob and has_name:
+        return claim
+
+    if not (claim.client_id and claim.mco != MCO.UNKNOWN):
         return claim
 
     try:
@@ -101,35 +113,60 @@ async def ensure_claim_patient_identity(claim: Claim) -> Claim:
         entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
         provider_npi = entity.billing_npi if entity else claim.npi
         provider_taxid = entity.tax_id if entity else ""
-        # Use the Claim.MD payer ID (e.g. "54154") not the MCO enum value ("sentara")
         elig_payer_id = getattr(claim, "claimmd_payer_id", "") or _mco_to_claimmd_payer_id(claim.mco)
         if not elig_payer_id:
             logger.warning("No Claim.MD payer ID for eligibility fallback", claim_id=claim.claim_id, mco=claim.mco.value)
             return claim
-        elig = await api.check_eligibility(
-            member_last=last,
-            member_first=first,
-            payer_id=elig_payer_id,
-            service_date=claim.dos.strftime("%Y%m%d"),
-            provider_npi=provider_npi,
-            provider_taxid=provider_taxid,
-            member_id=claim.client_id,
-        )
+
+        # Build eligibility request — name is optional when member_id is provided
+        elig_kwargs = {
+            "payer_id": elig_payer_id,
+            "service_date": claim.dos.strftime("%Y%m%d"),
+            "provider_npi": provider_npi,
+            "provider_taxid": provider_taxid,
+            "member_id": claim.client_id,
+            "member_last": last if has_name else "",
+            "member_first": first if has_name else "",
+        }
+        elig = await api.check_eligibility(**elig_kwargs)
+
         # Response may be {"elig": {"ins_dob": ..., "ins_sex": ...}} or flat
         elig_data = elig.get("elig", elig) if isinstance(elig.get("elig"), dict) else elig
+
+        # Recover patient name
+        elig_first = str(elig_data.get("ins_name_f", "") or "").strip()
+        elig_last = str(elig_data.get("ins_name_l", "") or "").strip()
+        if elig_first and elig_last and (name_is_pcn or not has_name):
+            claim.patient_first_name = elig_first.upper()
+            claim.patient_last_name = elig_last.upper()
+            claim.patient_full_name = f"{elig_last.upper()}, {elig_first.upper()}"
+            claim.client_name = claim.patient_full_name
+            logger.info(
+                "Recovered patient name from Claim.MD eligibility",
+                claim_id=claim.claim_id,
+                name=claim.patient_full_name,
+            )
+
+        # Recover DOB
         dob = str(elig_data.get("ins_dob", "") or "").strip()
         if dob:
-            # Normalize YYYYMMDD → YYYY-MM-DD for Availity
             if len(dob) == 8 and dob.isdigit():
                 dob = f"{dob[:4]}-{dob[4:6]}-{dob[6:8]}"
             claim.client_dob = dob
             logger.info("Recovered patient DOB from Claim.MD eligibility", claim_id=claim.claim_id, dob=dob)
+
+        # Recover gender
         gender_raw = str(elig_data.get("ins_sex", "") or "").strip()
         if gender_raw and not getattr(claim, "gender_code", ""):
             claim.gender_code = gender_raw[0].upper() if gender_raw else ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("Claim.MD eligibility fallback failed", claim_id=claim.claim_id, error=str(exc))
     return claim
+
+
+def _looks_like_pcn(value: str) -> bool:
+    raw = str(value or "").strip().upper()
+    return raw.startswith("CW") and "-" in raw
 
 
 class OptumClaimInquiryClient:
