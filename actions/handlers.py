@@ -1025,6 +1025,30 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     lookup = PayerAuthorizationLookup()
 
     # ==================================================================
+    # PRE-CHECK: Read Claim.MD notes for existing staff determinations
+    # ==================================================================
+    try:
+        notes_result = await api._post("notes", {"ClaimID": claim.claim_id})
+        claim_notes = notes_result.get("notes", [])
+        for n in claim_notes:
+            note_text = (n.get("note", "") or "").upper()
+            if str(n.get("claimmd_id", "")) != str(claim.claim_id):
+                continue
+            # Staff already flagged as write-off
+            if "WRITE OFF" in note_text or "WRITE-OFF" in note_text:
+                logger.info(
+                    "Staff already flagged claim for write-off",
+                    claim_id=claim.claim_id,
+                    note=n.get("note", "")[:100],
+                    user=n.get("username", ""),
+                )
+                # Verify in Lauris AR if write-off was applied
+                # (fall through to Step 1 which checks AR)
+                break
+    except Exception as exc:
+        logger.warning("Notes check failed", error=str(exc)[:100])
+
+    # ==================================================================
     # STEP 1: CHECK PAYER CLAIM STATUS — is it paid, pending, or denied?
     # ==================================================================
     try:
@@ -1039,6 +1063,19 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
 
         if claim_status.status == "paid":
+            # Check if this is a write-off (already resolved in Lauris)
+            if claim_status.check_number == "Write Off":
+                return ResolutionResult(
+                    claim=claim,
+                    action_taken=ResolutionAction.SKIP,
+                    success=True,
+                    note_written=(
+                        f"Claim already written off in Lauris "
+                        f"(${claim_status.paid_amount:.2f} on "
+                        f"{claim_status.effective_date or 'N/A'})."
+                    ),
+                )
+
             # Payer says paid but Lauris shows outstanding → ERA posting gap
             note = (
                 f"Payer reports claim PAID — ${claim_status.paid_amount:.2f}, "

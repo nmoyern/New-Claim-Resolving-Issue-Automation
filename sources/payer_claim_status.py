@@ -99,12 +99,13 @@ async def _check_claimmd_era(claim: Claim) -> PayerClaimStatusResult | None:
 
 
 def _check_lauris_ar(bs_id: str) -> PayerClaimStatusResult | None:
-    """Check Lauris AR Information XML for payments on a billing summary ID."""
+    """Check Lauris AR Information XML for payments or write-offs on a billing summary ID."""
     try:
         from sources.lauris_xml import _fetch_xml, AR_INFO_XML
         ar_root = _fetch_xml(AR_INFO_XML, cache_key="lauris_ar_information")
 
         total_received = 0.0
+        total_written_off = 0.0
         check_number = ""
         deposit_date = ""
 
@@ -116,12 +117,28 @@ def _check_lauris_ar(bs_id: str) -> PayerClaimStatusResult | None:
             chk = (row.findtext("Check_Number") or "").strip()
             dep = (row.findtext("Deposit_Date") or "").strip()[:10]
 
-            if rcvd > 0 and chk.lower() != "write off":
+            if chk.lower() == "write off":
+                total_written_off += rcvd
+            elif rcvd > 0:
                 total_received += rcvd
                 if chk:
                     check_number = chk
                 if dep:
                     deposit_date = dep
+
+        # Written off = claim resolved, no further action
+        if total_written_off > 0 and total_received == 0:
+            logger.info(
+                "Lauris AR shows write-off",
+                bs_id=bs_id,
+                written_off=total_written_off,
+            )
+            return PayerClaimStatusResult(
+                status="paid",
+                paid_amount=total_written_off,
+                check_number="Write Off",
+                effective_date=deposit_date,
+            )
 
         if total_received > 0:
             logger.info(
