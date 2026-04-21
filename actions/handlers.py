@@ -1022,6 +1022,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
 
     api = ClaimMDAPI()
+    lookup = PayerAuthorizationLookup()
 
     # ==================================================================
     # STEP 1: CHECK PAYER CLAIM STATUS — is it paid, pending, or denied?
@@ -1131,32 +1132,139 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                     for b in benefits
                 )
                 if elig and not is_active:
-                    note = (
-                        f"Member is NOT ACTIVE with {claim.mco.value} "
-                        f"as of DOS {claim.dos}. "
-                        f"Coverage may have changed to a different MCO."
+                    # Member inactive with billed MCO — check ALL MCOs
+                    # to find correct coverage, then check if auth exists
+                    logger.info(
+                        "Member inactive — checking all MCOs",
+                        claim_id=claim.claim_id,
+                        billed_mco=claim.mco.value,
                     )
+                    all_payer_checks = [
+                        ("54154", "Sentara"),
+                        ("00180", "Anthem BCBS VA"),
+                        ("87726", "UHC"),
+                        ("VAMCD", "VAMCD/Magellan"),
+                        ("128VA", "Aetna"),
+                        ("61101", "Humana"),
+                        ("MCCVA", "Molina"),
+                    ]
+                    active_mcos: list[tuple[str, str, str]] = []
+                    for chk_pid, chk_label in all_payer_checks:
+                        try:
+                            chk_result = await api.check_eligibility(
+                                member_last=last,
+                                member_first=first,
+                                payer_id=chk_pid,
+                                service_date=(
+                                    claim.dos.strftime("%Y%m%d")
+                                    if claim.dos else ""
+                                ),
+                                provider_npi=billed_entity.billing_npi,
+                                provider_taxid=billed_entity.tax_id,
+                                member_id=claim.client_id,
+                                member_dob=dob.replace("-", ""),
+                            )
+                            chk_elig = chk_result.get("elig", {})
+                            chk_benefits = chk_elig.get("benefit", [])
+                            chk_active = any(
+                                b.get("benefit_coverage_code") == "1"
+                                for b in chk_benefits
+                            )
+                            if chk_active:
+                                chk_ins = chk_elig.get("ins_number", "")
+                                chk_plan = (
+                                    chk_elig.get("group_name", "")
+                                    or chk_elig.get("plan_name", "")
+                                )
+                                active_mcos.append(
+                                    (chk_label, chk_ins, chk_plan)
+                                )
+                        except Exception:
+                            pass
+
+                    # Build eligibility summary
+                    elig_lines = [
+                        f"- {claim.mco.value}: INACTIVE (billed MCO)",
+                    ]
+                    for mco_label, mco_ins, mco_plan in active_mcos:
+                        elig_lines.append(
+                            f"- {mco_label}: ACTIVE — "
+                            f"member #{mco_ins}, plan: {mco_plan[:50]}"
+                        )
+
+                    # If active with another MCO, check for auth
+                    auth_found_elsewhere = False
+                    auth_details = ""
+                    if active_mcos:
+                        # Try 278I auth check for Availity MCOs
+                        for mco_label, _, _ in active_mcos:
+                            if mco_label in ("Anthem BCBS VA",):
+                                # Try auth lookup with Anthem
+                                try:
+                                    for ent in ENTITIES:
+                                        ar = await lookup.service_review.obtain_authorization(
+                                            claim, ent,
+                                        )
+                                        if ar.found:
+                                            auth_found_elsewhere = True
+                                            auth_details = (
+                                                f"Auth found under "
+                                                f"{ent.display_name}: "
+                                                f"{ar.auth_number} — "
+                                                f"{ar.reason}"
+                                            )
+                                            break
+                                except Exception:
+                                    pass
+
+                    if auth_found_elsewhere:
+                        # Auth exists under different MCO → rebill
+                        note = (
+                            f"Member inactive with {claim.mco.value}. "
+                            f"{auth_details}. "
+                            f"Needs rebilling to correct MCO."
+                        )
+                        action_text = (
+                            f"**Rebill to correct MCO.** {auth_details}"
+                        )
+                    else:
+                        # No auth anywhere → write-off
+                        note = (
+                            f"Member inactive with {claim.mco.value}. "
+                            f"No auth found under any entity for any "
+                            f"active MCO. Recommend write-off."
+                        )
+                        action_text = (
+                            "**No authorization found for any active MCO "
+                            "under any entity.** Write off this claim in "
+                            "Lauris and archive in Claim.MD."
+                        )
+
                     if api.key:
                         from notes.formatter import format_note
                         await api.add_claim_note(
                             claim.claim_id, format_note(note),
                         )
 
+                    # ClickUp with full findings
                     try:
                         tc = ClickUpTaskCreator()
                         await tc.create_task(
                             list_id=tc.list_id,
                             name=(
-                                f"Insurance Change — {claim.client_name} — "
+                                f"Insurance Mismatch — "
+                                f"{claim.client_name} — "
                                 f"inactive with {claim.mco.value}"
                             ),
                             description=(
                                 f"{_client_info_block(claim)}\n\n"
                                 f"**Member is NOT active with "
-                                f"{claim.mco.value} as of DOS {claim.dos}.**"
+                                f"{claim.mco.value} on DOS {claim.dos}.**"
                                 f"\n\n"
-                                f"**Action needed:** Verify current MCO, "
-                                f"update Lauris, and rebill to correct payer."
+                                f"**Eligibility checked across all MCOs:**"
+                                f"\n"
+                                + "\n".join(elig_lines)
+                                + f"\n\n{action_text}"
                             ),
                             assignees=get_assignees("billing"),
                             due_date=_next_business_day(),
@@ -1192,7 +1300,6 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     # ==================================================================
     # STEP 3: VALIDATE / OBTAIN AUTH — sweep entities, compare, correct
     # ==================================================================
-    lookup = PayerAuthorizationLookup()
     corrections: dict[str, str] = {}
     discrepancies: list[str] = []
     claim_auth = (claim.auth_number or "").strip()
