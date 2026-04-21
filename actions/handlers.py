@@ -944,18 +944,18 @@ async def _determine_entity_or_clickup(claim: Claim) -> str:
 
 async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     """
-    Auth verification via payer APIs — two-step validate-then-obtain.
+    Three-step claim resolution via payer APIs.
 
-    Step 1 — VALIDATE what was submitted on the claim (from Lauris via
-    Claim.MD).  Query the payer API to check if the auth number, company,
-    service, and dates on the claim are correct.
+    Step 1 — CLAIM STATUS: Check if payer already paid (276 / Optum).
+             If paid but Lauris shows outstanding → ERA posting gap.
+             If pending → wait, don't act.
 
-    Step 2 — If validation fails or auth is missing, OBTAIN the correct
-    auth from the payer API by searching member + DOS + service.
+    Step 2 — ELIGIBILITY: Is the member active with this MCO on DOS?
+             If inactive → find correct MCO. ClickUp for staff.
 
-    Any corrections (wrong auth #, wrong entity, etc.) are applied to the
-    claim AND a ClickUp task is created so staff can fix Lauris to prevent
-    future billing errors.
+    Step 3 — AUTH VALIDATE/OBTAIN: Sweep all entities to find the
+             correct auth. Compare against claim data, correct
+             discrepancies, resubmit. ClickUp for Lauris fixes.
     """
     if await _is_claim_already_resolved(claim.claim_id):
         return ResolutionResult(
@@ -964,15 +964,17 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
     logger.info("Handling MCO auth check", claim_id=claim.claim_id, mco=claim.mco.value)
 
-    from sources.payer_auth_lookup import PayerAuthorizationLookup
+    from sources.payer_auth_lookup import PayerAuthorizationLookup, ELIG_PAYER_IDS
+    from sources.payer_claim_status import PayerClaimStatusChecker
     from sources.lauris_demographics import (
         fetch_lauris_demographics,
         enrich_claim_with_demographics,
     )
-    from config.entities import ENTITIES, get_entity_by_npi, get_entity_by_program
+    from config.entities import ENTITIES
     from actions.clickup_tasks import (
         ClickUpTaskCreator,
         PRIORITY_HIGH,
+        PRIORITY_URGENT,
         get_assignees,
         _next_business_day,
     )
@@ -995,31 +997,186 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             human_reason="Cannot determine billing entity for auth lookup.",
         )
 
-    lookup = PayerAuthorizationLookup()
     api = ClaimMDAPI()
-    corrections: dict[str, str] = {}
-    discrepancies: list[str] = []
 
-    # ------------------------------------------------------------------
-    # Step 1: VALIDATE — check the auth on the claim against the payer
-    # ------------------------------------------------------------------
-    claim_auth = (claim.auth_number or "").strip()
-    auth_result = None
-
-    if claim_auth:
+    # ==================================================================
+    # STEP 1: CHECK PAYER CLAIM STATUS — is it paid, pending, or denied?
+    # ==================================================================
+    try:
+        status_checker = PayerClaimStatusChecker()
+        claim_status = await status_checker.check_status(claim, billed_entity)
         logger.info(
-            "Validating auth on claim against payer",
+            "Payer claim status",
             claim_id=claim.claim_id,
-            auth=claim_auth,
-            entity=billed_entity.key,
+            status=claim_status.status,
+            paid=claim_status.paid_amount,
+            check=claim_status.check_number,
         )
 
-    # ------------------------------------------------------------------
-    # Step 2: OBTAIN — search by member + DOS to find the correct auth
-    # ------------------------------------------------------------------
+        if claim_status.status == "paid":
+            # Payer says paid but Lauris shows outstanding → ERA posting gap
+            note = (
+                f"Payer reports claim PAID — ${claim_status.paid_amount:.2f}, "
+                f"check #{claim_status.check_number or 'N/A'}, "
+                f"effective {claim_status.effective_date or 'N/A'}. "
+                f"Lauris still shows outstanding. ERA may not be posted."
+            )
+            if api.key:
+                from notes.formatter import format_note
+                await api.add_claim_note(claim.claim_id, format_note(note))
+
+            # ClickUp for ERA reconciliation
+            try:
+                tc = ClickUpTaskCreator()
+                await tc.create_task(
+                    list_id=tc.list_id,
+                    name=(
+                        f"ERA Posting — {claim.client_name} — "
+                        f"${claim_status.paid_amount:.2f}"
+                    ),
+                    description=(
+                        f"{_client_info_block(claim)}\n\n"
+                        f"**Payer reports this claim is PAID but Lauris "
+                        f"still shows it as outstanding.**\n\n"
+                        f"- Paid amount: ${claim_status.paid_amount:.2f}\n"
+                        f"- Check #: {claim_status.check_number or 'N/A'}\n"
+                        f"- Effective: {claim_status.effective_date or 'N/A'}\n"
+                        f"- Denial codes: {', '.join(claim_status.denial_codes[:3]) if claim_status.denial_codes else 'None'}\n\n"
+                        f"**Action needed:** Verify ERA is posted to Lauris. "
+                        f"If ERA is missing, download from Claim.MD and post."
+                    ),
+                    assignees=get_assignees("billing"),
+                    due_date=_next_business_day(),
+                    priority=PRIORITY_HIGH,
+                )
+            except Exception as exc:
+                logger.warning("ERA ClickUp creation failed", error=str(exc)[:100])
+
+            return ResolutionResult(
+                claim=claim,
+                action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+                success=True,
+                note_written=note,
+            )
+
+        if claim_status.status == "pending":
+            note = (
+                f"Payer reports claim is still PENDING/IN PROCESS. "
+                f"No action needed — waiting for payer adjudication."
+            )
+            return ResolutionResult(
+                claim=claim,
+                action_taken=ResolutionAction.SKIP,
+                success=True,
+                note_written=note,
+            )
+
+    except Exception as exc:
+        logger.warning(
+            "Payer claim status check failed — continuing to eligibility",
+            claim_id=claim.claim_id,
+            error=str(exc)[:200],
+        )
+
+    # ==================================================================
+    # STEP 2: CHECK ELIGIBILITY — is the member active with this MCO?
+    # ==================================================================
+    elig_payer = ELIG_PAYER_IDS.get(claim.mco)
+    if elig_payer and billed_entity:
+        try:
+            from sources.payer_auth_lookup import _claim_name_parts, _claim_dob
+            first, last = _claim_name_parts(claim)
+            dob = _claim_dob(claim)
+            if first and last and dob:
+                elig_result = await api.check_eligibility(
+                    member_last=last,
+                    member_first=first,
+                    payer_id=elig_payer,
+                    service_date=(
+                        claim.dos.strftime("%Y%m%d") if claim.dos else ""
+                    ),
+                    provider_npi=billed_entity.billing_npi,
+                    provider_taxid=billed_entity.tax_id,
+                    member_id=claim.client_id,
+                    member_dob=dob.replace("-", ""),
+                )
+                elig = elig_result.get("elig", {})
+                benefits = elig.get("benefit", [])
+                is_active = any(
+                    b.get("benefit_coverage_code") == "1"
+                    for b in benefits
+                )
+                if elig and not is_active:
+                    note = (
+                        f"Member is NOT ACTIVE with {claim.mco.value} "
+                        f"as of DOS {claim.dos}. "
+                        f"Coverage may have changed to a different MCO."
+                    )
+                    if api.key:
+                        from notes.formatter import format_note
+                        await api.add_claim_note(
+                            claim.claim_id, format_note(note),
+                        )
+
+                    try:
+                        tc = ClickUpTaskCreator()
+                        await tc.create_task(
+                            list_id=tc.list_id,
+                            name=(
+                                f"Insurance Change — {claim.client_name} — "
+                                f"inactive with {claim.mco.value}"
+                            ),
+                            description=(
+                                f"{_client_info_block(claim)}\n\n"
+                                f"**Member is NOT active with "
+                                f"{claim.mco.value} as of DOS {claim.dos}.**"
+                                f"\n\n"
+                                f"**Action needed:** Verify current MCO, "
+                                f"update Lauris, and rebill to correct payer."
+                            ),
+                            assignees=get_assignees("billing"),
+                            due_date=_next_business_day(),
+                            priority=PRIORITY_URGENT,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Eligibility ClickUp failed",
+                            error=str(exc)[:100],
+                        )
+
+                    return ResolutionResult(
+                        claim=claim,
+                        action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+                        success=False,
+                        needs_human=True,
+                        human_reason=note,
+                        note_written=note,
+                    )
+
+                logger.info(
+                    "Member eligibility confirmed",
+                    claim_id=claim.claim_id,
+                    mco=claim.mco.value,
+                    active=is_active,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Eligibility check failed — continuing to auth",
+                error=str(exc)[:100],
+            )
+
+    # ==================================================================
+    # STEP 3: VALIDATE / OBTAIN AUTH — sweep entities, compare, correct
+    # ==================================================================
+    lookup = PayerAuthorizationLookup()
+    corrections: dict[str, str] = {}
+    discrepancies: list[str] = []
+    claim_auth = (claim.auth_number or "").strip()
+
     # Try each entity to find where the auth actually lives
     correct_entity = None
     correct_auth = None
+    auth_result = None
 
     for entity in ENTITIES:
         try:
@@ -1037,9 +1194,10 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             correct_auth = result
             auth_result = result
             break
+        if result:
+            auth_result = result
 
     if not correct_auth:
-        # No auth found under any entity
         api_reason = auth_result.reason if auth_result else "API lookup not attempted"
         logger.info(
             "Auth not found via payer API under any entity",
@@ -1067,11 +1225,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         claim_entity=billed_entity.key,
     )
 
-    # ------------------------------------------------------------------
-    # Compare what the payer has vs what was on the claim
-    # ------------------------------------------------------------------
-
-    # Auth number mismatch
+    # Compare payer auth vs claim data
     if claim_auth and claim_auth != payer_auth:
         discrepancies.append(
             f"Auth # wrong: claim has '{claim_auth}', "
@@ -1084,7 +1238,6 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
         corrections["auth_number"] = payer_auth
 
-    # Entity/company mismatch
     if correct_entity.key != billed_entity.key:
         discrepancies.append(
             f"Company wrong: billed under {billed_entity.display_name} "
@@ -1093,9 +1246,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
         corrections["billing_npi"] = correct_entity.billing_npi
 
-    # ------------------------------------------------------------------
-    # If no discrepancies, auth is correct and on claim but still denied
-    # ------------------------------------------------------------------
+    # No discrepancies — auth is correct but still denied
     if not discrepancies:
         note = (
             f"Auth #{payer_auth} confirmed via payer API. "
@@ -1119,9 +1270,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             note_written=note,
         )
 
-    # ------------------------------------------------------------------
-    # Discrepancies found — correct the claim and create ClickUp task
-    # ------------------------------------------------------------------
+    # Discrepancies found — correct claim and ClickUp for Lauris
     discrepancy_summary = "; ".join(discrepancies)
     logger.info(
         "Claim data discrepancies found — correcting",
@@ -1129,7 +1278,6 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         discrepancies=discrepancy_summary,
     )
 
-    # Apply corrections to Claim.MD
     note = (
         f"Payer API found auth #{payer_auth} under "
         f"{correct_entity.display_name}. "
@@ -1146,7 +1294,6 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 claim.claim_id, "payer_api_correction", note,
             )
 
-    # Create ClickUp task so staff can fix Lauris to prevent recurrence
     try:
         tc = ClickUpTaskCreator()
         clickup_description = (
@@ -1166,28 +1313,20 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             f"\n**Action needed:** Update Lauris authorization and/or "
             f"billing info to match the payer data above."
         )
-
-        task_name = (
-            f"Lauris Fix — {claim.client_name} — "
-            f"{discrepancies[0].split(':')[0]}"
-        )
         await tc.create_task(
             list_id=tc.list_id,
-            name=task_name,
+            name=(
+                f"Lauris Fix — {claim.client_name} — "
+                f"{discrepancies[0].split(':')[0]}"
+            ),
             description=clickup_description,
             assignees=get_assignees("billing"),
             due_date=_next_business_day(),
             priority=PRIORITY_HIGH,
         )
-        logger.info(
-            "ClickUp task created for Lauris correction",
-            claim_id=claim.claim_id,
-            task_name=task_name,
-        )
     except Exception as exc:
         logger.warning(
-            "Failed to create Lauris correction ClickUp task",
-            error=str(exc)[:200],
+            "Lauris correction ClickUp failed", error=str(exc)[:200],
         )
 
     return ResolutionResult(
