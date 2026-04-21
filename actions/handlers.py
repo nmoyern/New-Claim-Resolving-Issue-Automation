@@ -946,9 +946,13 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     """
     Auth verification for the narrowed rejected/denied claim workflow.
 
-    This handler no longer checks fax logs, Dropbox folders, Lauris fax
-    records, or Nextiva. If an auth is not found through the configured payer
-    access path, the claim stops for human review.
+    Steps:
+      1. Try to obtain the auth via API (Availity 278I for Anthem/Aetna/
+         Molina/Humana, Optum GraphQL for UHC).
+      2. If auth found and matches claim service/entity/dates:
+         a. If auth already on claim → flag for reconsideration.
+         b. If auth NOT on claim → attach it and resubmit.
+      3. If no auth found → create ClickUp task for human follow-up.
     """
     if await _is_claim_already_resolved(claim.claim_id):
         return ResolutionResult(
@@ -957,17 +961,118 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
     logger.info("Handling MCO auth check", claim_id=claim.claim_id, mco=claim.mco.value)
 
-    return ResolutionResult(
-        claim=claim,
-        action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-        success=False,
-        needs_human=True,
-        human_reason=(
-            "Claim needs auth follow-up. This narrowed automation only uses "
-            "Optum for United and Availity for other MCO claim-status checks; "
-            "provider portal, Lauris auth-page, fax, refax, and Dropbox lookup "
-            "workflows are disabled here."
-        ),
+    # ------------------------------------------------------------------
+    # Step 1: Try to obtain auth via payer API (278I / Optum)
+    # ------------------------------------------------------------------
+    from sources.payer_auth_lookup import PayerAuthorizationLookup
+    from sources.lauris_demographics import (
+        fetch_lauris_demographics,
+        enrich_claim_with_demographics,
+    )
+
+    # Enrich claim with DOB/gender from Lauris (needed for API calls)
+    try:
+        demos = fetch_lauris_demographics()
+        enrich_claim_with_demographics(claim, demos)
+    except Exception as exc:
+        logger.warning("Demographics enrichment failed", error=str(exc)[:100])
+
+    # Determine which entity billed this claim
+    entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
+    if not entity:
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+            success=False,
+            needs_human=True,
+            human_reason="Cannot determine billing entity for auth lookup.",
+        )
+
+    lookup = PayerAuthorizationLookup()
+    auth_result = None
+    try:
+        auth_result = await lookup.obtain_authorization(claim, entity)
+    except Exception as exc:
+        logger.warning(
+            "Auth API lookup failed",
+            claim_id=claim.claim_id,
+            error=str(exc)[:200],
+        )
+
+    if auth_result and auth_result.found and auth_result.auth_number:
+        auth_num = auth_result.auth_number
+        logger.info(
+            "Auth obtained via API",
+            claim_id=claim.claim_id,
+            auth=auth_num,
+            reason=auth_result.reason,
+        )
+
+        # Check if auth is already on the claim
+        if claim.auth_number and claim.auth_number == auth_num:
+            # Auth already on claim but still denied → reconsideration
+            note = (
+                f"Auth #{auth_num} confirmed via payer API and already on claim. "
+                f"{auth_result.reason}. Flagging for reconsideration."
+            )
+            api = ClaimMDAPI()
+            if api.key:
+                from notes.formatter import format_note
+                await api.add_claim_note(claim.claim_id, format_note(note))
+            return ResolutionResult(
+                claim=claim,
+                action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+                success=False,
+                needs_human=True,
+                human_reason=(
+                    f"Auth #{auth_num} is on claim and confirmed by payer, "
+                    f"but claim was still denied. Needs reconsideration."
+                ),
+                note_written=note,
+            )
+
+        # Auth found but NOT on claim → attach and resubmit
+        claim.auth_number = auth_num
+        corrections = {"auth_number": auth_num}
+        note = (
+            f"Auth #{auth_num} obtained from payer API. "
+            f"{auth_result.reason}. "
+            f"Adding to claim and resubmitting."
+        )
+
+        api = ClaimMDAPI()
+        success = False
+        if api.key:
+            success = await api.modify_claim(claim.claim_id, corrections)
+            if success:
+                from notes.formatter import format_note
+                await api.add_claim_note(claim.claim_id, format_note(note))
+                log_autonomous_correction(
+                    claim.claim_id,
+                    "api_auth_added",
+                    note,
+                )
+                logger.info(
+                    "Auth added to claim and resubmitted",
+                    claim_id=claim.claim_id,
+                    auth=auth_num,
+                )
+
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+            success=success,
+            note_written=note,
+        )
+
+    # ------------------------------------------------------------------
+    # Auth not found via API — log why and fall through to human review
+    # ------------------------------------------------------------------
+    api_reason = auth_result.reason if auth_result else "API lookup not attempted"
+    logger.info(
+        "Auth not found via API",
+        claim_id=claim.claim_id,
+        reason=api_reason,
     )
 
     # -----------------------------------------------------------------------
