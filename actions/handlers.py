@@ -944,15 +944,18 @@ async def _determine_entity_or_clickup(claim: Claim) -> str:
 
 async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
     """
-    Auth verification for the narrowed rejected/denied claim workflow.
+    Auth verification via payer APIs — two-step validate-then-obtain.
 
-    Steps:
-      1. Try to obtain the auth via API (Availity 278I for Anthem/Aetna/
-         Molina/Humana, Optum GraphQL for UHC).
-      2. If auth found and matches claim service/entity/dates:
-         a. If auth already on claim → flag for reconsideration.
-         b. If auth NOT on claim → attach it and resubmit.
-      3. If no auth found → create ClickUp task for human follow-up.
+    Step 1 — VALIDATE what was submitted on the claim (from Lauris via
+    Claim.MD).  Query the payer API to check if the auth number, company,
+    service, and dates on the claim are correct.
+
+    Step 2 — If validation fails or auth is missing, OBTAIN the correct
+    auth from the payer API by searching member + DOS + service.
+
+    Any corrections (wrong auth #, wrong entity, etc.) are applied to the
+    claim AND a ClickUp task is created so staff can fix Lauris to prevent
+    future billing errors.
     """
     if await _is_claim_already_resolved(claim.claim_id):
         return ResolutionResult(
@@ -961,16 +964,20 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
     logger.info("Handling MCO auth check", claim_id=claim.claim_id, mco=claim.mco.value)
 
-    # ------------------------------------------------------------------
-    # Step 1: Try to obtain auth via payer API (278I / Optum)
-    # ------------------------------------------------------------------
     from sources.payer_auth_lookup import PayerAuthorizationLookup
     from sources.lauris_demographics import (
         fetch_lauris_demographics,
         enrich_claim_with_demographics,
     )
+    from config.entities import ENTITIES, get_entity_by_npi, get_entity_by_program
+    from actions.clickup_tasks import (
+        ClickUpTaskCreator,
+        PRIORITY_HIGH,
+        get_assignees,
+        _next_business_day,
+    )
 
-    # Enrich claim with DOB/gender from Lauris (needed for API calls)
+    # Enrich claim with DOB/gender from Lauris (demographics are reliable)
     try:
         demos = fetch_lauris_demographics()
         enrich_claim_with_demographics(claim, demos)
@@ -978,8 +985,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         logger.warning("Demographics enrichment failed", error=str(exc)[:100])
 
     # Determine which entity billed this claim
-    entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
-    if not entity:
+    billed_entity = get_entity_by_npi(claim.npi) or get_entity_by_program(claim.program)
+    if not billed_entity:
         return ResolutionResult(
             claim=claim,
             action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
@@ -989,103 +996,205 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
 
     lookup = PayerAuthorizationLookup()
+    api = ClaimMDAPI()
+    corrections: dict[str, str] = {}
+    discrepancies: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Step 1: VALIDATE — check the auth on the claim against the payer
+    # ------------------------------------------------------------------
+    claim_auth = (claim.auth_number or "").strip()
     auth_result = None
-    try:
-        auth_result = await lookup.obtain_authorization(claim, entity)
-    except Exception as exc:
-        logger.warning(
-            "Auth API lookup failed",
-            claim_id=claim.claim_id,
-            error=str(exc)[:200],
-        )
 
-    if auth_result and auth_result.found and auth_result.auth_number:
-        auth_num = auth_result.auth_number
+    if claim_auth:
         logger.info(
-            "Auth obtained via API",
+            "Validating auth on claim against payer",
             claim_id=claim.claim_id,
-            auth=auth_num,
-            reason=auth_result.reason,
+            auth=claim_auth,
+            entity=billed_entity.key,
         )
 
-        # Check if auth is already on the claim
-        if claim.auth_number and claim.auth_number == auth_num:
-            # Auth already on claim but still denied → reconsideration
-            note = (
-                f"Auth #{auth_num} confirmed via payer API and already on claim. "
-                f"{auth_result.reason}. Flagging for reconsideration."
-            )
-            api = ClaimMDAPI()
-            if api.key:
-                from notes.formatter import format_note
-                await api.add_claim_note(claim.claim_id, format_note(note))
-            return ResolutionResult(
-                claim=claim,
-                action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-                success=False,
-                needs_human=True,
-                human_reason=(
-                    f"Auth #{auth_num} is on claim and confirmed by payer, "
-                    f"but claim was still denied. Needs reconsideration."
-                ),
-                note_written=note,
-            )
+    # ------------------------------------------------------------------
+    # Step 2: OBTAIN — search by member + DOS to find the correct auth
+    # ------------------------------------------------------------------
+    # Try each entity to find where the auth actually lives
+    correct_entity = None
+    correct_auth = None
 
-        # Auth found but NOT on claim → attach and resubmit
-        claim.auth_number = auth_num
-        corrections = {"auth_number": auth_num}
-        note = (
-            f"Auth #{auth_num} obtained from payer API. "
-            f"{auth_result.reason}. "
-            f"Adding to claim and resubmitting."
+    for entity in ENTITIES:
+        try:
+            result = await lookup.obtain_authorization(claim, entity)
+        except Exception as exc:
+            logger.warning(
+                "Auth lookup failed for entity",
+                entity=entity.key,
+                error=str(exc)[:100],
+            )
+            continue
+
+        if result and result.found and result.auth_number:
+            correct_entity = entity
+            correct_auth = result
+            auth_result = result
+            break
+
+    if not correct_auth:
+        # No auth found under any entity
+        api_reason = auth_result.reason if auth_result else "API lookup not attempted"
+        logger.info(
+            "Auth not found via payer API under any entity",
+            claim_id=claim.claim_id,
+            reason=api_reason,
         )
-
-        api = ClaimMDAPI()
-        success = False
-        if api.key:
-            success = await api.modify_claim(claim.claim_id, corrections)
-            if success:
-                from notes.formatter import format_note
-                await api.add_claim_note(claim.claim_id, format_note(note))
-                log_autonomous_correction(
-                    claim.claim_id,
-                    "api_auth_added",
-                    note,
-                )
-                logger.info(
-                    "Auth added to claim and resubmitted",
-                    claim_id=claim.claim_id,
-                    auth=auth_num,
-                )
-
         return ResolutionResult(
             claim=claim,
             action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-            success=success,
+            success=False,
+            needs_human=True,
+            human_reason=(
+                f"Payer API ({claim.mco.value}) did not return a matching "
+                f"auth under any entity. {api_reason}"
+            ),
+        )
+
+    payer_auth = correct_auth.auth_number
+    logger.info(
+        "Payer auth found",
+        claim_id=claim.claim_id,
+        payer_auth=payer_auth,
+        payer_entity=correct_entity.key,
+        claim_auth=claim_auth,
+        claim_entity=billed_entity.key,
+    )
+
+    # ------------------------------------------------------------------
+    # Compare what the payer has vs what was on the claim
+    # ------------------------------------------------------------------
+
+    # Auth number mismatch
+    if claim_auth and claim_auth != payer_auth:
+        discrepancies.append(
+            f"Auth # wrong: claim has '{claim_auth}', "
+            f"payer has '{payer_auth}'"
+        )
+        corrections["auth_number"] = payer_auth
+    elif not claim_auth:
+        discrepancies.append(
+            f"Auth # missing on claim: payer has '{payer_auth}'"
+        )
+        corrections["auth_number"] = payer_auth
+
+    # Entity/company mismatch
+    if correct_entity.key != billed_entity.key:
+        discrepancies.append(
+            f"Company wrong: billed under {billed_entity.display_name} "
+            f"(NPI {billed_entity.billing_npi}), auth is under "
+            f"{correct_entity.display_name} (NPI {correct_entity.billing_npi})"
+        )
+        corrections["billing_npi"] = correct_entity.billing_npi
+
+    # ------------------------------------------------------------------
+    # If no discrepancies, auth is correct and on claim but still denied
+    # ------------------------------------------------------------------
+    if not discrepancies:
+        note = (
+            f"Auth #{payer_auth} confirmed via payer API. "
+            f"Correct company ({correct_entity.display_name}), "
+            f"correct auth, correct dates. "
+            f"{correct_auth.reason}. "
+            f"Claim was still denied — needs reconsideration."
+        )
+        if api.key:
+            from notes.formatter import format_note
+            await api.add_claim_note(claim.claim_id, format_note(note))
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+            success=False,
+            needs_human=True,
+            human_reason=(
+                f"Auth #{payer_auth} is correct and on claim, but still "
+                f"denied. Needs reconsideration. {correct_auth.reason}"
+            ),
             note_written=note,
         )
 
     # ------------------------------------------------------------------
-    # Auth not found via payer API — go to human review.
-    # Do NOT fall back to Lauris for auth/company/MCO data — staff
-    # entries are unreliable.  Payer API is the source of truth.
+    # Discrepancies found — correct the claim and create ClickUp task
     # ------------------------------------------------------------------
-    api_reason = auth_result.reason if auth_result else "API lookup not attempted"
+    discrepancy_summary = "; ".join(discrepancies)
     logger.info(
-        "Auth not found via payer API — escalating to human review",
+        "Claim data discrepancies found — correcting",
         claim_id=claim.claim_id,
-        reason=api_reason,
+        discrepancies=discrepancy_summary,
     )
+
+    # Apply corrections to Claim.MD
+    note = (
+        f"Payer API found auth #{payer_auth} under "
+        f"{correct_entity.display_name}. "
+        f"Corrections needed: {discrepancy_summary}. "
+        f"Correcting claim and resubmitting."
+    )
+    success = False
+    if api.key:
+        success = await api.modify_claim(claim.claim_id, corrections)
+        if success:
+            from notes.formatter import format_note
+            await api.add_claim_note(claim.claim_id, format_note(note))
+            log_autonomous_correction(
+                claim.claim_id, "payer_api_correction", note,
+            )
+
+    # Create ClickUp task so staff can fix Lauris to prevent recurrence
+    try:
+        tc = ClickUpTaskCreator()
+        clickup_description = (
+            f"{_client_info_block(claim)}\n\n"
+            f"**The automation corrected this claim and resubmitted it, "
+            f"but Lauris needs to be updated to prevent future billing "
+            f"errors.**\n\n"
+            f"**Discrepancies found by payer API:**\n"
+        )
+        for d in discrepancies:
+            clickup_description += f"- {d}\n"
+        clickup_description += (
+            f"\n**Correct values (from payer):**\n"
+            f"- Auth #: {payer_auth}\n"
+            f"- Company: {correct_entity.display_name}\n"
+            f"- {correct_auth.reason}\n"
+            f"\n**Action needed:** Update Lauris authorization and/or "
+            f"billing info to match the payer data above."
+        )
+
+        task_name = (
+            f"Lauris Fix — {claim.client_name} — "
+            f"{discrepancies[0].split(':')[0]}"
+        )
+        await tc.create_task(
+            list_id=tc.list_id,
+            name=task_name,
+            description=clickup_description,
+            assignees=get_assignees("billing"),
+            due_date=_next_business_day(),
+            priority=PRIORITY_HIGH,
+        )
+        logger.info(
+            "ClickUp task created for Lauris correction",
+            claim_id=claim.claim_id,
+            task_name=task_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to create Lauris correction ClickUp task",
+            error=str(exc)[:200],
+        )
 
     return ResolutionResult(
         claim=claim,
         action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-        success=False,
-        needs_human=True,
-        human_reason=(
-            f"Payer API ({claim.mco.value}) did not return a matching auth. "
-            f"Reason: {api_reason}"
-        ),
+        success=success,
+        note_written=note,
     )
 
 
