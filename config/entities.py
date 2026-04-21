@@ -21,6 +21,10 @@ class BillingEntity:
     tax_id: str
     availity_submitter_id: str
     availity_provider_name: str
+    address_line1: str = ""
+    city: str = ""
+    state: str = ""
+    zip_code: str = ""
 
 
 MARYS_HOME = BillingEntity(
@@ -32,6 +36,10 @@ MARYS_HOME = BillingEntity(
     tax_id="861567663",
     availity_submitter_id="1636587",
     availity_provider_name="MARYS HOME INC",
+    address_line1="4020 PORTSMOUTH BLVD",
+    city="CHESAPEAKE",
+    state="VA",
+    zip_code="23321",
 )
 
 NHCS = BillingEntity(
@@ -43,6 +51,10 @@ NHCS = BillingEntity(
     tax_id="465232420",
     availity_submitter_id="628128",
     availity_provider_name="NEW HEIGHTS COMMUNITY SUPPORT",
+    address_line1="407 E CHURCH ST",
+    city="MARTINSVILLE",
+    state="VA",
+    zip_code="24112",
 )
 
 KJLN = BillingEntity(
@@ -54,6 +66,10 @@ KJLN = BillingEntity(
     tax_id="821966562",
     availity_submitter_id="977164",
     availity_provider_name="KJLN INC",
+    address_line1="4020 PORTSMOUTH BLVD",
+    city="CHESAPEAKE",
+    state="VA",
+    zip_code="23321",
 )
 
 ENTITIES: tuple[BillingEntity, ...] = (MARYS_HOME, NHCS, KJLN)
