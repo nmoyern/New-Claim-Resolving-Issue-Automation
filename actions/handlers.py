@@ -979,6 +979,30 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         _next_business_day,
     )
 
+    # ==================================================================
+    # EARLY EXIT: $0 claims — archive in Claim.MD, skip everything else
+    # ==================================================================
+    if claim.billed_amount <= 0:
+        logger.info(
+            "$0 claim — archiving",
+            claim_id=claim.claim_id,
+            amount=claim.billed_amount,
+        )
+        api = ClaimMDAPI()
+        if api.key:
+            await api.archive_claim(
+                claim.claim_id,
+                reason="$0 billing amount — Lauris data entry error",
+            )
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.SKIP,
+            success=True,
+            note_written=(
+                "$0 claim archived. Lauris submitted $0 charge / 0 units."
+            ),
+        )
+
     # Enrich claim with DOB/gender from Lauris (demographics are reliable)
     try:
         demos = fetch_lauris_demographics()
@@ -1246,28 +1270,72 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
         corrections["billing_npi"] = correct_entity.billing_npi
 
-    # No discrepancies — auth is correct but still denied
+    # No discrepancies — auth, company, service all correct but still denied
+    # → Submit reconsideration automatically + ClickUp notification
     if not discrepancies:
-        note = (
+        recon_note = (
             f"Auth #{payer_auth} confirmed via payer API. "
             f"Correct company ({correct_entity.display_name}), "
             f"correct auth, correct dates. "
             f"{correct_auth.reason}. "
-            f"Claim was still denied — needs reconsideration."
+            f"Claim data verified correct — submitting reconsideration."
         )
+
+        recon_success = False
         if api.key:
             from notes.formatter import format_note
-            await api.add_claim_note(claim.claim_id, format_note(note))
+            recon_success = await api.submit_appeal(claim.claim_id, {
+                "AppealType": "reconsideration",
+            })
+            await api.add_claim_note(
+                claim.claim_id, format_note(recon_note),
+            )
+            if recon_success:
+                log_autonomous_correction(
+                    claim.claim_id,
+                    "reconsideration_submitted",
+                    recon_note,
+                )
+
+        # ClickUp notification for recon submission
+        try:
+            tc = ClickUpTaskCreator()
+            await tc.create_task(
+                list_id=tc.list_id,
+                name=(
+                    f"Reconsideration Submitted — {claim.client_name} — "
+                    f"{claim.mco.value}"
+                ),
+                description=(
+                    f"{_client_info_block(claim)}\n\n"
+                    f"**Automation submitted a reconsideration for this "
+                    f"claim.**\n\n"
+                    f"**Verified by payer API:**\n"
+                    f"- Auth #: {payer_auth} (confirmed)\n"
+                    f"- Company: {correct_entity.display_name} (confirmed)\n"
+                    f"- {correct_auth.reason}\n\n"
+                    f"**All claim data is correct** — auth, company, "
+                    f"service, and dates match the payer's records. "
+                    f"Claim was still denied, so reconsideration was "
+                    f"submitted.\n\n"
+                    f"**Next step:** If reconsideration does not resolve "
+                    f"within the allotted time, submit an appeal."
+                ),
+                assignees=get_assignees("billing"),
+                due_date=_next_business_day(),
+                priority=PRIORITY_HIGH,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Recon ClickUp notification failed",
+                error=str(exc)[:100],
+            )
+
         return ResolutionResult(
             claim=claim,
-            action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
-            success=False,
-            needs_human=True,
-            human_reason=(
-                f"Auth #{payer_auth} is correct and on claim, but still "
-                f"denied. Needs reconsideration. {correct_auth.reason}"
-            ),
-            note_written=note,
+            action_taken=ResolutionAction.RECONSIDERATION,
+            success=recon_success,
+            note_written=recon_note,
         )
 
     # Discrepancies found — correct claim and ClickUp for Lauris
