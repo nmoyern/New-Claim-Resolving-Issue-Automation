@@ -40,6 +40,7 @@ class PayerAuthorizationLookup:
 
     def __init__(self):
         self.optum = OptumAuthorizationLookup()
+        self.optum_claims = OptumClaimInquiry()
         self.availity = AvailityEntityClaimStatusLookup()
         self.service_review = AvailityServiceReviewInquiry()
 
@@ -59,13 +60,13 @@ class PayerAuthorizationLookup:
     ) -> AuthLookupResult:
         """Obtain an authorization number from the payer.
 
-        Unlike check_authorization (which validates entity match), this
-        actively retrieves the cert number via 278I Service Review Inquiry.
-        UHC/Optum uses its own GraphQL endpoint; all other MCOs go through
-        Availity 278I.
+        For non-UHC MCOs: Availity 278I Service Review Inquiry.
+        For UHC: Optum SearchClaim (claim inquiry) to get claim status
+        and denial details. The auth/referral SearchPriorAuths API does
+        not support VA CCC+ Medicaid members in production.
         """
         if claim.mco == MCO.UNITED:
-            return await self.optum.check_authorization(claim, entity)
+            return await self.optum_claims.lookup_claim(claim, entity)
         return await self.service_review.obtain_authorization(claim, entity)
 
 
@@ -119,7 +120,7 @@ query SearchPriorAuths($priorAuthSearchInput: PriorAuthSearchInput!) {
             "OPTUM_AUTH_URL",
             "https://sandbox-apigw.optum.com/oihub/patient/auth/referral/v1",
         )
-        self.environment = os.getenv("OPTUM_ENVIRONMENT", "sandbox")
+        self.environment = os.getenv("OPTUM_ENVIRONMENT", "")
         self._token = ""
         self._token_expiry = 0.0
 
@@ -160,7 +161,7 @@ query SearchPriorAuths($priorAuthSearchInput: PriorAuthSearchInput!) {
                 "lastName": last,
                 "id": claim.client_id,
                 "dateOfBirth": patient_dob,
-                "groupNumber": "",
+                "groupNumber": _optum_group_number(claim),
             },
             "status": "All",
             "startDate": _ymd(claim.dos),
@@ -224,6 +225,228 @@ query SearchPriorAuths($priorAuthSearchInput: PriorAuthSearchInput!) {
             ) as resp:
                 body = await resp.json(content_type=None)
                 return {"status_code": resp.status, "body": body, "operation": operation_name}
+
+
+class OptumClaimInquiry:
+    """Optum claim inquiry via SearchClaim GraphQL.
+
+    Returns real claim data for UHC — status, denial codes, payments,
+    and line-level adjudication.  Works for VA CCC+ Medicaid members
+    (unlike SearchPriorAuths which only supports commercial plans).
+
+    Key: omit the ``environment: sandbox`` header to get live data.
+    """
+
+    SEARCH_CLAIM_QUERY = """
+query SearchClaim($searchClaimInput: SearchClaimInput!) {
+  searchClaim(searchClaimInput: $searchClaimInput) {
+    claims {
+      claimNumber claimStatus hasClaimDetails
+      member { firstName lastName dateOfBirth memberId subscriberId policyNumber }
+      provider {
+        submitted { billingTin billingProviderName billingNpi renderingProviderName }
+        adjudicated { billingTin billingProviderName billingNpi }
+      }
+      claimEvents { receivedDate processedDate serviceStartDate serviceEndDate }
+      claimLevelInfo { patientAccountNumber claimType }
+      claimLevelTotalAmount {
+        totalBilledChargeAmount totalPaidAmount totalAllowedAmount
+      }
+      claimAdjudicationCodes { claimCodeType code description }
+      claimDetailedInformation {
+        claimNumber adjudicatedClaimSummaryStatus
+        diagnosisCodes { diagnosisCode diagnosisCodeType }
+        lines {
+          lineNumber procedureCode serviceCode modifiers unitCount
+          lineEvents { serviceStartDate serviceEndDate }
+          lineLevelTotalAmounts { billedChargeAmount paidAmount allowedAmount }
+          lineAdjudicationCodes { type code description }
+        }
+      }
+    }
+    pagination { hasMoreRecords nextPageToken }
+  }
+}
+"""
+
+    def __init__(self):
+        self.client_id = os.getenv("OPTUM_CLIENT_ID", "")
+        self.client_secret = os.getenv("OPTUM_CLIENT_SECRET", "")
+        self.token_url = os.getenv(
+            "OPTUM_TOKEN_URL",
+            "https://sandbox-apigw.optum.com/apip/auth/sntl/v1/token",
+        )
+        self.base_url = os.getenv(
+            "OPTUM_BASE_URL",
+            "https://sandbox-apigw.optum.com/oihub/claim/inquiry/v1",
+        )
+        self._token = ""
+        self._token_expiry = 0.0
+
+    async def _token_value(self) -> str:
+        if self._token and time.time() < self._token_expiry - 60:
+            return self._token
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.token_url,
+                data={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "grant_type": "client_credentials",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status >= 400:
+                    raise RuntimeError(f"Optum token failed: HTTP {resp.status} {data}")
+                self._token = data["access_token"]
+                self._token_expiry = time.time() + int(data.get("expires_in", 3600))
+                return self._token
+
+    async def search_by_pcn(
+        self, pcn: str, entity: BillingEntity,
+    ) -> dict[str, Any]:
+        """Search Optum by Patient Account Number (PCN like CW4236-1201181)."""
+        return await self._search(
+            {"patientAccountNumber": pcn, "payerId": OPTUM_PAYER_ID},
+            entity,
+        )
+
+    async def search_by_member(
+        self,
+        member_id: str,
+        dob: str,
+        dos_start: str,
+        dos_end: str,
+        entity: BillingEntity,
+    ) -> dict[str, Any]:
+        """Search Optum by member ID + DOB + service dates."""
+        return await self._search(
+            {
+                "memberId": member_id,
+                "memberDateOfBirth": dob,
+                "serviceStartDate": dos_start,
+                "serviceEndDate": dos_end,
+                "payerId": OPTUM_PAYER_ID,
+            },
+            entity,
+        )
+
+    async def lookup_claim(
+        self, claim: Claim, entity: BillingEntity,
+    ) -> AuthLookupResult:
+        """Look up a UHC claim and extract auth/denial info.
+
+        Tries PCN first, then falls back to member ID + DOS.
+        """
+        if not (self.client_id and self.client_secret):
+            return AuthLookupResult(
+                found=False, entity=entity,
+                reason="Optum claim inquiry credentials not configured.",
+            )
+
+        pcn = str(getattr(claim, "patient_account_number", "") or "").strip()
+        raw = None
+
+        # Try PCN first (most reliable match)
+        if pcn:
+            raw = await self.search_by_pcn(pcn, entity)
+
+        # Fallback to member + DOS
+        claims = (raw or {}).get("claims", [])
+        if not claims:
+            dob = _claim_dob(claim)
+            if dob and claim.client_id:
+                dos_str = claim.dos.strftime("%m/%d/%Y") if claim.dos else ""
+                if dos_str:
+                    raw = await self.search_by_member(
+                        claim.client_id, dob.replace("-", "/") if "-" in dob
+                        else dob, dos_str, dos_str, entity,
+                    )
+                    claims = (raw or {}).get("claims", [])
+
+        if not claims:
+            return AuthLookupResult(
+                found=False, entity=entity,
+                reason="Optum claim inquiry returned no claims.",
+                raw=raw or {},
+            )
+
+        return _auth_result_from_optum_claim(claims[0], entity, claim)
+
+    async def _search(
+        self, search_input: dict, entity: BillingEntity,
+    ) -> dict[str, Any]:
+        token = await self._token_value()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "providerTaxId": entity.tax_id,
+            "x-optum-consumer-correlation-id": str(uuid.uuid4()),
+            # NO 'environment' header = live data
+        }
+        variables: dict[str, Any] = {
+            "searchClaimInput": search_input,
+            "operationName": "searchClaim",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.base_url,
+                headers=headers,
+                json={"query": self.SEARCH_CLAIM_QUERY, "variables": variables},
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                body = await resp.json(content_type=None)
+                data = body.get("data", {}).get("searchClaim", {}) or {}
+                return data
+
+
+def _auth_result_from_optum_claim(
+    claim_data: dict, entity: BillingEntity, claim: Claim,
+) -> AuthLookupResult:
+    """Parse Optum SearchClaim result into AuthLookupResult."""
+    status = claim_data.get("claimStatus", "")
+    claim_num = claim_data.get("claimNumber", "")
+    totals = claim_data.get("claimLevelTotalAmount", {})
+    paid = float(totals.get("totalPaidAmount", "0") or "0")
+    billed = float(totals.get("totalBilledChargeAmount", "0") or "0")
+
+    # Extract denial/adjudication codes
+    adj_codes = claim_data.get("claimAdjudicationCodes", [])
+    detail = claim_data.get("claimDetailedInformation", {}) or {}
+    lines = detail.get("lines", [])
+    line_codes = []
+    for line in lines:
+        for lc in line.get("lineAdjudicationCodes", []):
+            line_codes.append(lc)
+
+    all_codes = adj_codes + line_codes
+    denial_reasons = [
+        f"{c.get('code', '')}: {c.get('description', '')}"
+        for c in all_codes
+        if c.get("code")
+    ]
+
+    # Check if claim is paid
+    if status == "Finalized" and paid > 0:
+        return AuthLookupResult(
+            found=True, entity=entity, auth_number="",
+            reason=(
+                f"Optum claim {claim_num}: Finalized, paid ${paid:.2f}. "
+                f"No auth issue — claim is paid."
+            ),
+            raw=claim_data,
+        )
+
+    # Denied — report the reason
+    reason_summary = "; ".join(denial_reasons[:3]) if denial_reasons else status
+    return AuthLookupResult(
+        found=False, entity=entity, auth_number="",
+        reason=f"Optum claim {claim_num}: {status}. {reason_summary}",
+        raw=claim_data,
+    )
 
 
 class AvailityEntityClaimStatusLookup:
@@ -768,6 +991,15 @@ def _claim_dob(claim: Claim) -> str:
 
 def _ymd(value: date) -> str:
     return value.strftime("%Y-%m-%d")
+
+
+def _optum_group_number(claim: Claim) -> str:
+    """Return the Optum group number for a UHC claim.
+
+    Virginia CCC+ (Medicaid managed care) uses group 'VACCCP'.
+    """
+    # All LCI UHC members are Virginia CCC+
+    return "VACCCP"
 
 
 async def _resolve_payer_member_id(
