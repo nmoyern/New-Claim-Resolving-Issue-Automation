@@ -22,7 +22,7 @@ logger = get_logger("lauris_demographics")
 
 LAURIS_DEMOGRAPHICS_URL = (
     "https://www12.laurisonline.com/reports/formsearchdataviewXML.aspx"
-    "?viewid=kxU36SOm4id%2bLc0hAh6YSQ%3d%3d"
+    "?viewid=5DipytbGOyfOZovnw%2fd01Q%3d%3d"
 )
 
 
@@ -34,15 +34,19 @@ class LaurisDemographics:
     last: str
     dob: str
     gender_code: str
+    closed_id: str = ""
+    billing_summary_id: str = ""
+    pcn: str = ""
 
 
 @lru_cache(maxsize=1)
 def fetch_lauris_demographics() -> dict[str, LaurisDemographics]:
     """
-    Return demographics keyed by Lauris Unique_ID.
+    Return demographics keyed by Lauris Unique_ID (Key).
 
-    This intentionally requires configured Lauris credentials; if unavailable,
-    callers should keep the claim in human review or use a non-DOB lookup path.
+    Each patient may have many billing rows; the dict keeps one entry per
+    patient with the PCN from the most recent row.  The full PCN→patient
+    index is built separately by _pcn_demographics_index().
     """
     username = os.environ.get("LAURIS_USERNAME", "")
     password = os.environ.get("LAURIS_PASSWORD", "")
@@ -52,30 +56,51 @@ def fetch_lauris_demographics() -> dict[str, LaurisDemographics]:
 
     response_text = fetch_xml_text(
         LAURIS_DEMOGRAPHICS_URL,
-        cache_key="lauris_claim_dob_gender_v2",
+        cache_key="lauris_demographics_v3",
         timeout=300,
     )
     root = ET.fromstring(response_text)
     out: dict[str, LaurisDemographics] = {}
-    for row in root.findall("Claim_V2_Gender__x0026__DOB1"):
-        uid = (row.findtext("Unique_ID") or "").strip()
+    pcn_index: dict[str, LaurisDemographics] = {}
+    for row in root:
+        uid = (row.findtext("Key") or "").strip()
         dob = _normalize_dob((row.findtext("DOB") or "").strip())
         if not (uid and dob):
             continue
-        full_name = (row.findtext("Client_Name") or "").strip()
+        full_name = (row.findtext("Name") or "").strip()
         first, last = _split_name(full_name)
         gender_code = _gender_code(row.findtext("Gender") or "")
-        out[uid] = LaurisDemographics(
+        closed_id = (row.findtext("Closed_ID") or "").strip()
+        bs_id = (row.findtext("Billing_Summary_ID") or "").strip()
+        pcn = f"CW{closed_id}-{bs_id}" if closed_id and bs_id else ""
+
+        demo = LaurisDemographics(
             lauris_id=uid,
             full_name=full_name,
             first=first,
             last=last,
             dob=dob,
             gender_code=gender_code,
+            closed_id=closed_id,
+            billing_summary_id=bs_id,
+            pcn=pcn,
         )
+        out[uid] = demo
+        if pcn:
+            pcn_index[pcn.upper()] = demo
 
-    logger.info("Lauris demographics fetched", count=len(out))
+    _PCN_INDEX.clear()
+    _PCN_INDEX.update(pcn_index)
+    logger.info(
+        "Lauris demographics fetched",
+        patients=len(out),
+        pcn_entries=len(pcn_index),
+    )
     return out
+
+
+# Module-level PCN index populated by fetch_lauris_demographics()
+_PCN_INDEX: dict[str, LaurisDemographics] = {}
 
 
 def enrich_claim_with_demographics(
@@ -87,14 +112,14 @@ def enrich_claim_with_demographics(
     if not demo:
         return claim
 
-    # The Claim dataclass is intentionally not changed yet; attach lightweight
-    # attributes consumed by payer_auth_lookup._claim_dob().
     claim.client_dob = demo.dob
     claim.gender_code = demo.gender_code
     claim.patient_full_name = demo.full_name
     claim.patient_first_name = demo.first
     claim.patient_last_name = demo.last
     claim.lauris_id = demo.lauris_id
+    if demo.pcn and not getattr(claim, "patient_account_number", ""):
+        claim.patient_account_number = demo.pcn
     return claim
 
 
@@ -114,6 +139,18 @@ def find_demographics_for_claim(
     if claim.lauris_id and claim.lauris_id in demographics:
         demo = demographics[claim.lauris_id]
         if _is_usable_patient_name(demo.full_name):
+            return demo
+
+    # PCN lookup — match CW{closed_id}-{bs_id} from Claim.MD against Lauris
+    pcn_to_check = (
+        getattr(claim, "patient_account_number", "") or ""
+    ).strip().upper()
+    if not pcn_to_check:
+        pcn_to_check = (claim.client_name or "").strip().upper()
+    if _looks_like_patient_account_number(pcn_to_check):
+        pcn_index = _pcn_demographics_index(demographics)
+        demo = pcn_index.get(pcn_to_check)
+        if demo:
             return demo
 
     bridge_demo = _billing_bridge_demographics(claim, demographics)
@@ -223,6 +260,23 @@ def _billing_bridge_lookup() -> dict[tuple[str, str], dict[str, str]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Billing bridge lookup unavailable", error=str(exc))
     return lookup
+
+
+def _pcn_demographics_index(
+    demographics: dict[str, LaurisDemographics],
+) -> dict[str, LaurisDemographics]:
+    """Return the PCN-keyed index built during fetch_lauris_demographics().
+
+    Falls back to building from the demographics dict if the module-level
+    index hasn't been populated yet.
+    """
+    if _PCN_INDEX:
+        return _PCN_INDEX
+    return {
+        demo.pcn.upper(): demo
+        for demo in demographics.values()
+        if demo.pcn
+    }
 
 
 def _looks_like_patient_account_number(value: str) -> bool:
