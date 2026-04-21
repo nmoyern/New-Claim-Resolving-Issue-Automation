@@ -39,7 +39,7 @@ class PayerClaimStatusResult:
 
 
 class PayerClaimStatusChecker:
-    """Check current claim status with the payer."""
+    """Check current claim status — Claim.MD ERA first, then payer API."""
 
     def __init__(self):
         self._availity = _AvailityClaimStatus()
@@ -48,14 +48,99 @@ class PayerClaimStatusChecker:
     async def check_status(
         self, claim: Claim, entity: BillingEntity,
     ) -> PayerClaimStatusResult:
+        # Step A: Check Claim.MD ERA/response data first.
+        # This catches payments from ALL payers including those without
+        # a 276 API (Sentara, VAMCD/Magellan).
+        era_result = await _check_claimmd_era(claim)
+        if era_result and era_result.status == "paid":
+            return era_result
+
+        # Step B: Check payer API for current status.
         if claim.mco == MCO.UNITED:
             return await self._optum.check(claim, entity)
         if claim.mco in AVAILITY_PAYER_IDS:
             return await self._availity.check(claim, entity)
+
+        # No payer API available — return ERA result if we got anything,
+        # otherwise not_found.
+        if era_result and era_result.status != "not_found":
+            return era_result
         return PayerClaimStatusResult(
-            status="error",
+            status="not_found",
             denial_codes=[f"No claim status API for {claim.mco.value}"],
         )
+
+
+async def _check_claimmd_era(claim: Claim) -> PayerClaimStatusResult | None:
+    """Check Claim.MD responses and Lauris AR for payment evidence.
+
+    Checks two sources:
+    1. Claim.MD responses — looks for paid status on any response for this PCN
+    2. Lauris AR data — checks if payment was received for this billing summary ID
+
+    Returns PayerClaimStatusResult if payment found, None otherwise.
+    """
+    pcn = str(getattr(claim, "patient_account_number", "") or "").strip()
+    if not pcn:
+        return None
+
+    # Check Lauris AR by billing summary ID (from PCN: CW{closed}-{bs_id})
+    try:
+        parts = pcn.upper().replace("CW", "").split("-")
+        if len(parts) == 2:
+            bs_id = parts[1]
+            result = _check_lauris_ar(bs_id)
+            if result:
+                return result
+    except Exception as exc:
+        logger.warning("Lauris AR check failed", error=str(exc)[:100])
+
+    return None
+
+
+def _check_lauris_ar(bs_id: str) -> PayerClaimStatusResult | None:
+    """Check Lauris AR Information XML for payments on a billing summary ID."""
+    try:
+        from sources.lauris_xml import _fetch_xml, AR_INFO_XML
+        ar_root = _fetch_xml(AR_INFO_XML, cache_key="lauris_ar_information")
+
+        total_received = 0.0
+        check_number = ""
+        deposit_date = ""
+
+        for row in ar_root.findall(".//AR_Information_View"):
+            row_bs_id = (row.findtext("Billing_Summary_ID") or "").strip()
+            if row_bs_id != bs_id:
+                continue
+            rcvd = float(row.findtext("Received_Amount") or "0")
+            chk = (row.findtext("Check_Number") or "").strip()
+            dep = (row.findtext("Deposit_Date") or "").strip()[:10]
+
+            if rcvd > 0 and chk.lower() != "write off":
+                total_received += rcvd
+                if chk:
+                    check_number = chk
+                if dep:
+                    deposit_date = dep
+
+        if total_received > 0:
+            logger.info(
+                "Lauris AR shows payment",
+                bs_id=bs_id,
+                received=total_received,
+                check=check_number,
+                deposit=deposit_date,
+            )
+            return PayerClaimStatusResult(
+                status="paid",
+                paid_amount=total_received,
+                check_number=check_number,
+                effective_date=deposit_date,
+            )
+    except Exception as exc:
+        logger.warning("Lauris AR parse failed", bs_id=bs_id, error=str(exc)[:100])
+
+    return None
 
 
 # ======================================================================
