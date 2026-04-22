@@ -539,19 +539,31 @@ class ClaimMDAPI:
         return result.get("notes", [])
 
     async def add_claim_note(self, claim_id: str, note_text: str) -> bool:
-        """Add a note to a claim via API (no browser needed)."""
+        """Add a note to a claim via browser (clicks 'Add Note / Reminder').
+
+        The Claim.MD notes API is read-only — notes can only be written
+        through the web interface. This uses browser automation to write
+        the note in the same place staff does.
+        """
         if DRY_RUN:
             logger.info("DRY_RUN: Would add note", claim_id=claim_id, note=note_text[:60])
             return True
 
-        result = await self._post("notes", {
-            "ClaimMD_ID": claim_id,
-            "NoteText": note_text,
-        })
-        success = bool(result)
-        if success:
-            logger.info("Note added via API", claim_id=claim_id)
-        return success
+        try:
+            from sources.claimmd import post_claim_note
+            success = await post_claim_note(claim_id, note_text)
+            if success:
+                logger.info("Note saved via browser", claim_id=claim_id)
+            else:
+                logger.warning("Note save failed via browser", claim_id=claim_id)
+            return success
+        except Exception as exc:
+            logger.warning(
+                "Browser note failed — note not saved",
+                claim_id=claim_id,
+                error=str(exc)[:100],
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Claim appeal

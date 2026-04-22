@@ -662,6 +662,83 @@ class ClaimMDSession(BrowserSession):
         except Exception as e:
             self.logger.error("Failed to write claim note", error=str(e))
 
+    async def write_and_save_note(self, claim: "Claim", note_text: str) -> bool:
+        """Write a note and click 'Add Note / Reminder' to save it.
+
+        This saves the note WITHOUT resubmitting the claim — uses the
+        dedicated 'Add Note / Reminder' button, not the main Save.
+        """
+        if not await self._open_claim(claim):
+            self.logger.error("Could not open claim for note", claim_id=claim.claim_id)
+            return False
+
+        try:
+            # Write the note text
+            notes_field = await self.page.query_selector(SELECTORS["notes_field"])
+            if not notes_field:
+                self.logger.warning("Notes field not found")
+                return False
+
+            existing = await notes_field.input_value()
+            new_text = f"{existing}\n{note_text}".strip() if existing else note_text
+            await notes_field.fill(new_text)
+
+            # Click "Add Note / Reminder" button
+            add_note_btn = await self.page.query_selector(
+                "input[value*='Add Note'], button:has-text('Add Note'), "
+                "a:has-text('Add Note'), input[value*='add note']"
+            )
+            if add_note_btn:
+                await add_note_btn.click()
+                await asyncio.sleep(2)
+                self.logger.info(
+                    "Note saved via Add Note/Reminder",
+                    claim_id=claim.claim_id,
+                    note_preview=note_text[:60],
+                )
+                return True
+            else:
+                self.logger.warning(
+                    "Add Note/Reminder button not found",
+                    claim_id=claim.claim_id,
+                )
+                return False
+        except Exception as e:
+            self.logger.error(
+                "Failed to save note",
+                claim_id=claim.claim_id,
+                error=str(e),
+            )
+            return False
+
+
+async def post_claim_note(claim_id: str, note_text: str) -> bool:
+    """Standalone function to write and save a note on a Claim.MD claim.
+
+    Opens a browser session, navigates to the claim, writes the note,
+    and clicks 'Add Note / Reminder'.
+    """
+    from config.models import Claim, MCO, Program, ClaimStatus
+
+    claim = Claim(
+        claim_id=claim_id,
+        client_name="",
+        client_id="",
+        dos=None,
+        mco=MCO.UNKNOWN,
+        program=Program.UNKNOWN,
+        billed_amount=0,
+        status=ClaimStatus.DENIED,
+    )
+    claim.claimmd_url = f"https://www.claim.md/monitor.plx?l=claim&id={claim_id}"
+
+    try:
+        async with ClaimMDSession(headless=True) as session:
+            return await session.write_and_save_note(claim, note_text)
+    except Exception as exc:
+        logger.warning("post_claim_note failed", claim_id=claim_id, error=str(exc)[:100])
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
