@@ -679,7 +679,7 @@ class AvailityServiceReviewInquiry:
             "toDate": _ymd(claim.dos),
         }
         gender_code = getattr(claim, "gender_code", "")
-        if gender_code:
+        if gender_code in ("M", "F"):
             params["patient.genderCode"] = gender_code
 
         raw = await self._submit_and_poll(token, params)
