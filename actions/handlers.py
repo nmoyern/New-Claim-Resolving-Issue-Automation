@@ -59,6 +59,51 @@ from reporting.autonomous_tracker import log_autonomous_correction
 
 logger = get_logger("action_handlers")
 
+
+async def _create_tracked_task(
+    claim: "Claim",
+    task_type: str,
+    name: str,
+    description: str,
+    assignees=None,
+    due_date=None,
+    priority=None,
+) -> str | None:
+    """Create a ClickUp task and record it in the claim→task tracking DB.
+
+    Appends response instructions to the description and records the
+    mapping so future runs can detect existing tasks and act on feedback.
+    """
+    from actions.clickup_tasks import ClickUpTaskCreator
+    from actions.clickup_feedback import record_claim_task, get_response_instructions
+
+    instructions = get_response_instructions(task_type)
+    full_desc = description + instructions
+
+    tc = ClickUpTaskCreator()
+    task_id = await tc.create_task(
+        list_id=tc.list_id,
+        name=name,
+        description=full_desc,
+        assignees=assignees,
+        due_date=due_date,
+        priority=priority,
+    )
+
+    if task_id and task_id != "dry-run-task-id":
+        pcn = str(getattr(claim, "patient_account_number", "") or "").strip()
+        record_claim_task(
+            claim_id=claim.claim_id,
+            pcn=pcn,
+            task_id=task_id,
+            task_type=task_type,
+            patient_name=claim.client_name,
+            patient_key=getattr(claim, "lauris_id", "") or claim.client_id,
+            mco=claim.mco.value if hasattr(claim.mco, "value") else str(claim.mco),
+        )
+
+    return task_id
+
 # Cache: client_id -> {"icd_code": "F25.0", "description": "...", "uid": "ID003496"}
 # Prevents re-opening Lauris for multiple claims from the same client
 _diagnosis_cache: dict = {}
@@ -971,6 +1016,13 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         enrich_claim_with_demographics,
     )
     from config.entities import ENTITIES
+    from actions.clickup_feedback import (
+        check_claim_has_pending_task,
+        reopen_existing_task,
+        record_claim_task,
+        get_response_instructions,
+        mark_task_processed,
+    )
     from actions.clickup_tasks import (
         ClickUpTaskCreator,
         PRIORITY_HIGH,
@@ -1002,6 +1054,32 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 "$0 claim archived. Lauris submitted $0 charge / 0 units."
             ),
         )
+
+    # ==================================================================
+    # CHECK FOR EXISTING CLICKUP TASK — avoid duplicates, act on feedback
+    # ==================================================================
+    pcn = str(getattr(claim, "patient_account_number", "") or "").strip()
+    pending = check_claim_has_pending_task(claim.claim_id, pcn)
+    if pending:
+        if pending["status"] == "pending_staff":
+            # Task exists, staff hasn't closed it yet — skip and update
+            await reopen_existing_task(
+                pending["task_id"], claim.claim_id, pcn,
+                f"Claim still outstanding. Current denial status unchanged.",
+            )
+            return ResolutionResult(
+                claim=claim,
+                action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
+                success=False,
+                needs_human=True,
+                human_reason=(
+                    f"Awaiting staff response on ClickUp task "
+                    f"{pending['task_id']} (encounter #{pending['encounter_count'] + 1})"
+                ),
+            )
+        elif pending["status"] == "staff_responded":
+            # Staff closed the task — process their response
+            return await _process_staff_feedback(claim, pending)
 
     # Enrich claim with DOB/gender from Lauris (demographics are reliable)
     try:
@@ -1089,9 +1167,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
 
             # ClickUp for ERA reconciliation
             try:
-                tc = ClickUpTaskCreator()
-                await tc.create_task(
-                    list_id=tc.list_id,
+                await _create_tracked_task(
+                    claim, "era_posting",
                     name=(
                         f"ERA Posting — {claim.client_name} — "
                         f"${claim_status.paid_amount:.2f}"
@@ -1285,9 +1362,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
 
                     # ClickUp with full findings
                     try:
-                        tc = ClickUpTaskCreator()
-                        await tc.create_task(
-                            list_id=tc.list_id,
+                        await _create_tracked_task(
+                            claim, "insurance_mismatch",
                             name=(
                                 f"Insurance Mismatch — "
                                 f"{claim.client_name} — "
@@ -1443,9 +1519,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             )
 
         try:
-            tc = ClickUpTaskCreator()
-            await tc.create_task(
-                list_id=tc.list_id,
+            await _create_tracked_task(
+                claim, "auth_verification",
                 name=(
                     f"Auth Verification Needed — "
                     f"{claim.client_name} — {claim.mco.value}"
@@ -1548,9 +1623,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
 
         # ClickUp notification for recon submission
         try:
-            tc = ClickUpTaskCreator()
-            await tc.create_task(
-                list_id=tc.list_id,
+            await _create_tracked_task(
+                claim, "recon_submitted",
                 name=(
                     f"Reconsideration Submitted — {claim.client_name} — "
                     f"{claim.mco.value}"
@@ -1612,7 +1686,6 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             )
 
     try:
-        tc = ClickUpTaskCreator()
         clickup_description = (
             f"{_client_info_block(claim)}\n\n"
             f"**The automation corrected this claim and resubmitted it, "
@@ -1630,8 +1703,8 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             f"\n**Action needed:** Update Lauris authorization and/or "
             f"billing info to match the payer data above."
         )
-        await tc.create_task(
-            list_id=tc.list_id,
+        await _create_tracked_task(
+            claim, "lauris_fix",
             name=(
                 f"Lauris Fix — {claim.client_name} — "
                 f"{discrepancies[0].split(':')[0]}"
@@ -1651,6 +1724,147 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
         success=success,
         note_written=note,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Process staff feedback from completed ClickUp tasks
+# ---------------------------------------------------------------------------
+
+async def _process_staff_feedback(
+    claim: Claim, feedback: dict,
+) -> ResolutionResult:
+    """Act on staff's response from a completed ClickUp task.
+
+    Called when poll_claim_feedback found a closed task with parsed
+    auth/entity/action fields.
+    """
+    from actions.clickup_feedback import mark_task_processed
+    from config.entities import get_entity_by_program
+
+    task_id = feedback.get("task_id", "")
+    parsed_auth = feedback.get("parsed_auth", "")
+    parsed_entity = feedback.get("parsed_entity", "")
+    parsed_action = feedback.get("parsed_action", "")
+    responded_by = feedback.get("responded_by", "")
+
+    logger.info(
+        "Processing staff feedback",
+        claim_id=claim.claim_id,
+        task_id=task_id,
+        auth=parsed_auth,
+        entity=parsed_entity,
+        action=parsed_action,
+        responded_by=responded_by,
+    )
+
+    api = ClaimMDAPI()
+
+    if parsed_action == "write_off":
+        note = (
+            f"Write-off per staff ({responded_by}) via ClickUp {task_id}. "
+            f"#AUTO #{date.today().strftime('%m/%d/%y')}"
+        )
+        if api.key:
+            await api.archive_claim(claim.claim_id, reason=note)
+            await api.add_claim_note(claim.claim_id, note)
+        mark_task_processed(task_id)
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.WRITE_OFF,
+            success=True,
+            note_written=note,
+        )
+
+    if parsed_action == "appeal":
+        note = (
+            f"Appeal submitted per staff ({responded_by}) via ClickUp {task_id}. "
+            f"#AUTO #{date.today().strftime('%m/%d/%y')}"
+        )
+        if api.key:
+            await api.submit_appeal(claim.claim_id, {"AppealType": "appeal"})
+            await api.add_claim_note(claim.claim_id, note)
+
+            # Attach DMAS license if provider eligibility issue
+            entity = get_entity_by_program(claim.program)
+            if entity and entity.dmas_license_pdf:
+                await api.upload_attachment(
+                    claim.claim_id,
+                    entity.dmas_license_pdf,
+                    filename=f"{entity.display_name}_DMAS_License.pdf",
+                )
+
+        mark_task_processed(task_id)
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.APPEAL_STEP3,
+            success=True,
+            note_written=note,
+        )
+
+    if parsed_action in ("resubmit", "rebill"):
+        corrections: dict[str, str] = {}
+        if parsed_auth:
+            corrections["auth_number"] = parsed_auth
+        if parsed_entity:
+            from config.entities import get_entity_by_program as _gep
+            entity_map = {"KJLN": "KJLN", "NHCS": "NHCS", "MARYS_HOME": "MARYS_HOME"}
+            if parsed_entity in entity_map:
+                from config.entities import ENTITIES
+                for ent in ENTITIES:
+                    if ent.key == parsed_entity:
+                        corrections["billing_npi"] = ent.billing_npi
+                        break
+
+        note = (
+            f"Claim corrected per staff ({responded_by}) via ClickUp "
+            f"{task_id}. "
+        )
+        if parsed_auth:
+            note += f"Auth: {parsed_auth}. "
+        if parsed_entity:
+            note += f"Entity: {parsed_entity}. "
+        note += (
+            f"Resubmitting. "
+            f"#AUTO #{date.today().strftime('%m/%d/%y')}"
+        )
+
+        success = False
+        if api.key and corrections:
+            success = await api.modify_claim(claim.claim_id, corrections)
+            if success:
+                await api.add_claim_note(claim.claim_id, note)
+                log_autonomous_correction(
+                    claim.claim_id, "staff_feedback_correction", note,
+                )
+
+        mark_task_processed(task_id)
+        return ResolutionResult(
+            claim=claim,
+            action_taken=ResolutionAction.CORRECT_AND_RESUBMIT,
+            success=success,
+            note_written=note,
+        )
+
+    # Unknown or missing action — log and skip
+    logger.warning(
+        "Staff feedback has no actionable parsed_action",
+        claim_id=claim.claim_id,
+        task_id=task_id,
+        parsed_action=parsed_action,
+        staff_response=feedback.get("staff_response", "")[:200],
+    )
+    mark_task_processed(task_id)
+    return ResolutionResult(
+        claim=claim,
+        action_taken=ResolutionAction.HUMAN_REVIEW,
+        success=False,
+        needs_human=True,
+        human_reason=(
+            f"Staff responded on ClickUp {task_id} but response "
+            f"could not be parsed into a clear action. "
+            f"Response: {feedback.get('staff_response', '')[:100]}"
+        ),
     )
 
 
