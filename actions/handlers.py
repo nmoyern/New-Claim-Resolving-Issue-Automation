@@ -1459,8 +1459,13 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                     f"**Eligibility verified on DOS {claim.dos}:**\n"
                     f"{elig_summary}\n\n"
                     f"**Action needed:** Verify authorization via "
-                    f"{claim.mco.value} portal. Confirm auth is valid "
-                    f"for the correct company, service, and dates."
+                    f"{claim.mco.value} portal. Confirm:\n"
+                    f"1. Auth is valid and active for DOS\n"
+                    f"2. Auth is under the correct company/entity "
+                    f"(Mary's Home, NHCS, or KJLN)\n"
+                    f"3. Auth covers the correct service ({claim.proc_code or 'check Lauris'})\n"
+                    f"4. DOS falls within the auth date range\n\n"
+                    f"Claim was billed under: **{billed_entity.display_name}**"
                 ),
                 assignees=get_assignees("billing"),
                 due_date=_next_business_day(),
