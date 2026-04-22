@@ -90,10 +90,11 @@ def _ensure_tables():
         )
     """)
 
-    # Pattern tracking — recurring issues by entity/MCO/denial
+    # Pattern tracking — snapshots by entity/MCO/denial (never overwritten)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS denial_patterns (
+        CREATE TABLE IF NOT EXISTS denial_pattern_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_date TEXT NOT NULL,
             pattern_key TEXT NOT NULL,
             entity_key TEXT DEFAULT '',
             mco TEXT DEFAULT '',
@@ -107,7 +108,35 @@ def _ensure_tables():
             total_recovered REAL DEFAULT 0,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
-            recommendation TEXT DEFAULT ''
+            recommendation TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # Run log — every single automation run recorded, never overwritten
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS automation_run_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_timestamp TEXT NOT NULL,
+            run_date TEXT NOT NULL,
+            run_number INTEGER DEFAULT 1,
+            total_claims INTEGER DEFAULT 0,
+            autonomous_resolved INTEGER DEFAULT 0,
+            human_review INTEGER DEFAULT 0,
+            already_paid INTEGER DEFAULT 0,
+            already_written_off INTEGER DEFAULT 0,
+            pending_skip INTEGER DEFAULT 0,
+            recon_submitted INTEGER DEFAULT 0,
+            appeal_submitted INTEGER DEFAULT 0,
+            corrections_made INTEGER DEFAULT 0,
+            era_posting INTEGER DEFAULT 0,
+            insurance_mismatch INTEGER DEFAULT 0,
+            dollars_recovered REAL DEFAULT 0,
+            dollars_written_off REAL DEFAULT 0,
+            dollars_outstanding REAL DEFAULT 0,
+            autonomous_rate REAL DEFAULT 0,
+            duration_seconds REAL DEFAULT 0,
+            notes TEXT DEFAULT ''
         )
     """)
 
@@ -128,12 +157,20 @@ def _ensure_tables():
         "ON claim_outcomes(action_taken)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dp_key "
-        "ON denial_patterns(pattern_key)"
+        "CREATE INDEX IF NOT EXISTS idx_dps_date "
+        "ON denial_pattern_snapshots(snapshot_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dps_key "
+        "ON denial_pattern_snapshots(pattern_key)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_drs_date "
         "ON daily_resolution_summary(run_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_arl_date "
+        "ON automation_run_log(run_date)"
     )
     conn.commit()
     conn.close()
@@ -282,11 +319,14 @@ def update_pending_outcomes() -> dict:
 # ======================================================================
 
 def update_denial_patterns() -> None:
-    """Aggregate claim_outcomes into denial_patterns for trend analysis."""
+    """Snapshot denial patterns — always INSERT, never overwrite.
+
+    Each run creates a point-in-time snapshot so trends can be tracked
+    over time by comparing snapshots across dates.
+    """
     conn = sqlite3.connect(str(_DB_PATH))
     conn.row_factory = sqlite3.Row
 
-    # Get all unique patterns
     rows = conn.execute("""
         SELECT entity_key, mco, denial_code,
                COUNT(*) as total,
@@ -304,6 +344,8 @@ def update_denial_patterns() -> None:
     """).fetchall()
 
     now = datetime.now().isoformat()
+    snapshot_date = date.today().isoformat()
+
     for row in rows:
         pattern_key = f"{row['entity_key']}_{row['mco']}_{row['denial_code']}"
         total = row["total"]
@@ -311,7 +353,6 @@ def update_denial_patterns() -> None:
         human_resolved = row["human_resolved"] or 0
         written_off = row["written_off"] or 0
 
-        # Generate recommendation
         recommendation = ""
         if total >= 5:
             auto_rate = auto_resolved / total if total > 0 else 0
@@ -324,24 +365,27 @@ def update_denial_patterns() -> None:
                 recommendation = "Mostly human-resolved — review for automation opportunity"
 
         conn.execute(
-            """INSERT OR REPLACE INTO denial_patterns
-               (pattern_key, entity_key, mco, denial_code,
+            """INSERT INTO denial_pattern_snapshots
+               (snapshot_date, pattern_key, entity_key, mco, denial_code,
                 occurrence_count, auto_resolved_count, human_resolved_count,
                 write_off_count, avg_resolution_days, total_billed,
-                total_recovered, first_seen, last_seen, recommendation)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                total_recovered, first_seen, last_seen, recommendation,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                pattern_key, row["entity_key"], row["mco"], row["denial_code"],
+                snapshot_date, pattern_key,
+                row["entity_key"], row["mco"], row["denial_code"],
                 total, auto_resolved, human_resolved,
                 written_off, row["avg_days"] or 0,
                 row["total_billed"] or 0, row["total_recovered"] or 0,
                 row["first_seen"], row["last_seen"], recommendation,
+                now,
             ),
         )
 
     conn.commit()
     conn.close()
-    logger.info("Denial patterns updated", patterns=len(rows))
+    logger.info("Denial pattern snapshot saved", patterns=len(rows), date=snapshot_date)
 
 
 # ======================================================================
@@ -364,7 +408,7 @@ def save_daily_summary(
     dollars_written_off: float = 0.0,
     dollars_outstanding: float = 0.0,
 ) -> None:
-    """Save a daily summary snapshot."""
+    """Save a summary snapshot. Always INSERT — multiple runs per day OK."""
     now = datetime.now().isoformat()
     today = date.today().isoformat()
     auto_rate = (
@@ -401,6 +445,78 @@ def save_daily_summary(
         autonomous=autonomous_resolved,
         auto_rate=f"{auto_rate:.1f}%",
     )
+
+
+def save_run_log(
+    total_claims: int = 0,
+    autonomous_resolved: int = 0,
+    human_review: int = 0,
+    already_paid: int = 0,
+    already_written_off: int = 0,
+    pending_skip: int = 0,
+    recon_submitted: int = 0,
+    appeal_submitted: int = 0,
+    corrections_made: int = 0,
+    era_posting: int = 0,
+    insurance_mismatch: int = 0,
+    dollars_recovered: float = 0.0,
+    dollars_written_off: float = 0.0,
+    dollars_outstanding: float = 0.0,
+    duration_seconds: float = 0.0,
+    notes: str = "",
+) -> int:
+    """Record a single automation run. Never overwritten.
+
+    Each run (even multiple per day) gets its own row with a run_number
+    incrementing per day.
+    """
+    now = datetime.now().isoformat()
+    today = date.today().isoformat()
+    auto_rate = (
+        autonomous_resolved / total_claims * 100
+        if total_claims > 0 else 0.0
+    )
+
+    conn = sqlite3.connect(str(_DB_PATH))
+
+    # Get run number for today
+    row = conn.execute(
+        "SELECT MAX(run_number) FROM automation_run_log WHERE run_date = ?",
+        (today,),
+    ).fetchone()
+    run_number = (row[0] or 0) + 1 if row else 1
+
+    cursor = conn.execute(
+        """INSERT INTO automation_run_log
+           (run_timestamp, run_date, run_number, total_claims,
+            autonomous_resolved, human_review, already_paid,
+            already_written_off, pending_skip, recon_submitted,
+            appeal_submitted, corrections_made, era_posting,
+            insurance_mismatch, dollars_recovered, dollars_written_off,
+            dollars_outstanding, autonomous_rate, duration_seconds, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            now, today, run_number, total_claims,
+            autonomous_resolved, human_review, already_paid,
+            already_written_off, pending_skip, recon_submitted,
+            appeal_submitted, corrections_made, era_posting,
+            insurance_mismatch, dollars_recovered, dollars_written_off,
+            dollars_outstanding, auto_rate, duration_seconds, notes,
+        ),
+    )
+    run_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    logger.info(
+        "Run logged",
+        run_id=run_id,
+        date=today,
+        run_number=run_number,
+        total=total_claims,
+        auto_rate=f"{auto_rate:.1f}%",
+    )
+    return run_id
 
 
 # ======================================================================
@@ -520,15 +636,25 @@ def get_success_by_mco(days: int = 30) -> list[dict]:
 
 
 def get_trending_denials(min_occurrences: int = 3) -> list[dict]:
-    """Get denial patterns that are trending (recurring issues)."""
+    """Get latest denial pattern snapshot that meets the threshold."""
     conn = sqlite3.connect(str(_DB_PATH))
     conn.row_factory = sqlite3.Row
 
+    # Get the most recent snapshot date
+    latest = conn.execute(
+        "SELECT MAX(snapshot_date) as d FROM denial_pattern_snapshots"
+    ).fetchone()
+    snapshot_date = latest["d"] if latest else None
+
+    if not snapshot_date:
+        conn.close()
+        return []
+
     rows = conn.execute(
-        """SELECT * FROM denial_patterns
-           WHERE occurrence_count >= ?
+        """SELECT * FROM denial_pattern_snapshots
+           WHERE snapshot_date = ? AND occurrence_count >= ?
            ORDER BY occurrence_count DESC""",
-        (min_occurrences,),
+        (snapshot_date, min_occurrences),
     ).fetchall()
     conn.close()
 
