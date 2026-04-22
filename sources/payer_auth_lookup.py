@@ -682,6 +682,12 @@ class AvailityServiceReviewInquiry:
         if gender_code in ("M", "F"):
             params["patient.genderCode"] = gender_code
 
+        # Humana requires contactName + phone on requestingProvider
+        # (enforced on both submission and inquiry endpoints)
+        if claim.mco == MCO.HUMANA:
+            params["requestingProvider.contactName"] = "LCI Billing"
+            params["requestingProvider.phone"] = "7572134272"
+
         raw = await self._submit_and_poll(token, params)
         return _auth_result_from_service_review(raw, entity, claim)
 
