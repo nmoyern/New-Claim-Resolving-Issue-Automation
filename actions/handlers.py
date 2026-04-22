@@ -56,8 +56,44 @@ from lauris.diagnosis import _lookup_uid_from_record_number
 from mco_portals.auth_checker import get_auth_checker, AvailityPortal
 from logging_utils.logger import get_logger
 from reporting.autonomous_tracker import log_autonomous_correction
+from reporting.outcome_tracker import record_action
 
 logger = get_logger("action_handlers")
+
+
+def _track_outcome(
+    claim: "Claim",
+    action: str,
+    detail: str = "",
+    human: bool = False,
+    clickup_task_id: str = "",
+) -> None:
+    """Record a claim action in the outcome tracker."""
+    try:
+        denial_code = ""
+        denial_reason = ""
+        if hasattr(claim, "denial_codes") and claim.denial_codes:
+            denial_code = claim.denial_codes[0].value if hasattr(claim.denial_codes[0], "value") else str(claim.denial_codes[0])
+        if hasattr(claim, "denial_reason_raw"):
+            denial_reason = str(claim.denial_reason_raw or "")[:200]
+
+        record_action(
+            claim_id=claim.claim_id,
+            pcn=str(getattr(claim, "patient_account_number", "") or ""),
+            patient_name=claim.client_name,
+            mco=claim.mco.value if hasattr(claim.mco, "value") else str(claim.mco),
+            dos=str(claim.dos) if claim.dos else "",
+            billed_amount=claim.billed_amount,
+            denial_code=denial_code,
+            denial_reason=denial_reason,
+            entity_key=getattr(claim, "npi", ""),
+            action_taken=action,
+            action_detail=detail,
+            human_intervention=human,
+            clickup_task_id=clickup_task_id,
+        )
+    except Exception as exc:
+        logger.warning("Outcome tracking failed", error=str(exc)[:100])
 
 
 async def _create_tracked_task(
@@ -1046,6 +1082,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 claim.claim_id,
                 reason="$0 billing amount — Lauris data entry error",
             )
+        _track_outcome(claim, "archived_zero_dollar", "Lauris $0 charge", human=False)
         return ResolutionResult(
             claim=claim,
             action_taken=ResolutionAction.SKIP,
@@ -1143,6 +1180,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         if claim_status.status == "paid":
             # Check if this is a write-off (already resolved in Lauris)
             if claim_status.check_number == "Write Off":
+                _track_outcome(claim, "already_written_off", human=False)
                 return ResolutionResult(
                     claim=claim,
                     action_taken=ResolutionAction.SKIP,
@@ -1191,6 +1229,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             except Exception as exc:
                 logger.warning("ERA ClickUp creation failed", error=str(exc)[:100])
 
+            _track_outcome(claim, "already_paid_era_needed", f"check={claim_status.check_number}", human=False)
             return ResolutionResult(
                 claim=claim,
                 action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
@@ -1199,6 +1238,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             )
 
         if claim_status.status == "pending":
+            _track_outcome(claim, "payer_pending", human=False)
             note = (
                 f"Payer reports claim is still PENDING/IN PROCESS. "
                 f"No action needed — waiting for payer adjudication."
@@ -1654,6 +1694,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 error=str(exc)[:100],
             )
 
+        _track_outcome(claim, "reconsideration_submitted", f"auth={payer_auth}", human=False)
         return ResolutionResult(
             claim=claim,
             action_taken=ResolutionAction.RECONSIDERATION,
@@ -1719,6 +1760,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             "Lauris correction ClickUp failed", error=str(exc)[:200],
         )
 
+    _track_outcome(claim, "corrected_resubmitted", discrepancy_summary, human=False)
     return ResolutionResult(
         claim=claim,
         action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
