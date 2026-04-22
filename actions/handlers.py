@@ -1372,6 +1372,106 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
             claim_id=claim.claim_id,
             reason=api_reason,
         )
+
+        # For payers without 278I (Sentara, UHC/VA CCC+) or when auth
+        # isn't found — verify eligibility across all MCOs and create
+        # a detailed ClickUp for human review with insurance findings.
+        from sources.payer_auth_lookup import _claim_name_parts, _claim_dob
+        elig_lines: list[str] = []
+        try:
+            first_e, last_e = _claim_name_parts(claim)
+            dob_e = _claim_dob(claim)
+            if first_e and last_e and dob_e:
+                all_payer_checks = [
+                    ("54154", "Sentara"),
+                    ("00180", "Anthem BCBS VA"),
+                    ("87726", "UHC"),
+                    ("VAMCD", "VAMCD/Magellan"),
+                    ("128VA", "Aetna"),
+                    ("61101", "Humana"),
+                    ("MCCVA", "Molina"),
+                ]
+                for chk_pid, chk_label in all_payer_checks:
+                    try:
+                        chk_r = await api.check_eligibility(
+                            member_last=last_e,
+                            member_first=first_e,
+                            payer_id=chk_pid,
+                            service_date=(
+                                claim.dos.strftime("%Y%m%d")
+                                if claim.dos else ""
+                            ),
+                            provider_npi=billed_entity.billing_npi,
+                            provider_taxid=billed_entity.tax_id,
+                            member_id=claim.client_id,
+                            member_dob=dob_e.replace("-", ""),
+                        )
+                        chk_elig = chk_r.get("elig", {})
+                        chk_benefits = chk_elig.get("benefit", [])
+                        chk_active = any(
+                            b.get("benefit_coverage_code") == "1"
+                            for b in chk_benefits
+                        )
+                        chk_ins = chk_elig.get("ins_number", "")
+                        chk_plan = (
+                            chk_elig.get("group_name", "")
+                            or chk_elig.get("plan_name", "")
+                        )
+                        status_str = "ACTIVE" if chk_active else "INACTIVE"
+                        line = f"- {chk_label}: {status_str}"
+                        if chk_active and chk_ins:
+                            line += f" — member #{chk_ins}"
+                        if chk_active and chk_plan:
+                            line += f", plan: {chk_plan[:50]}"
+                        elig_lines.append(line)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        elig_summary = "\n".join(elig_lines) if elig_lines else "Eligibility check not available"
+
+        no_api_note = (
+            f"Auth could not be verified via payer API for "
+            f"{claim.mco.value}. {api_reason}\n"
+            f"Manual auth verification required (portal)."
+        )
+        if api.key:
+            from notes.formatter import format_note
+            await api.add_claim_note(
+                claim.claim_id, format_note(no_api_note),
+            )
+
+        try:
+            tc = ClickUpTaskCreator()
+            await tc.create_task(
+                list_id=tc.list_id,
+                name=(
+                    f"Auth Verification Needed — "
+                    f"{claim.client_name} — {claim.mco.value}"
+                ),
+                description=(
+                    f"{_client_info_block(claim)}\n\n"
+                    f"**Auth could not be verified via payer API.**\n"
+                    f"API reason: {api_reason}\n\n"
+                    f"Auth on claim (from Lauris): "
+                    f"{claim_auth or 'none'}\n\n"
+                    f"**Eligibility verified on DOS {claim.dos}:**\n"
+                    f"{elig_summary}\n\n"
+                    f"**Action needed:** Verify authorization via "
+                    f"{claim.mco.value} portal. Confirm auth is valid "
+                    f"for the correct company, service, and dates."
+                ),
+                assignees=get_assignees("billing"),
+                due_date=_next_business_day(),
+                priority=PRIORITY_HIGH,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Auth verification ClickUp failed",
+                error=str(exc)[:100],
+            )
+
         return ResolutionResult(
             claim=claim,
             action_taken=ResolutionAction.MCO_PORTAL_AUTH_CHECK,
