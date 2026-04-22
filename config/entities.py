@@ -25,6 +25,7 @@ class BillingEntity:
     city: str = ""
     state: str = ""
     zip_code: str = ""
+    dmas_license_pdf: str = ""
 
 
 MARYS_HOME = BillingEntity(
@@ -40,6 +41,7 @@ MARYS_HOME = BillingEntity(
     city="CHESAPEAKE",
     state="VA",
     zip_code="23321",
+    dmas_license_pdf="data/dmas_licenses/marys_home_dmas_license.pdf",
 )
 
 NHCS = BillingEntity(
@@ -55,6 +57,7 @@ NHCS = BillingEntity(
     city="MARTINSVILLE",
     state="VA",
     zip_code="24112",
+    dmas_license_pdf="data/dmas_licenses/nhcs_dmas_license.pdf",
 )
 
 KJLN = BillingEntity(
@@ -70,6 +73,7 @@ KJLN = BillingEntity(
     city="CHESAPEAKE",
     state="VA",
     zip_code="23321",
+    dmas_license_pdf="data/dmas_licenses/kjln_dmas_license.pdf",
 )
 
 ENTITIES: tuple[BillingEntity, ...] = (MARYS_HOME, NHCS, KJLN)

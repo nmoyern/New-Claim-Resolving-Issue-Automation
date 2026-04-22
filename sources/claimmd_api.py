@@ -569,6 +569,77 @@ class ClaimMDAPI:
         return bool(result)
 
     # ------------------------------------------------------------------
+    # Attach supporting documentation
+    # ------------------------------------------------------------------
+
+    async def upload_attachment(
+        self, claim_id: str, file_path: str, filename: str = "",
+    ) -> bool:
+        """Upload a supporting document (PDF) to a claim.
+
+        Uses the Claim.MD upload endpoint with multipart form data.
+        The file is linked to the claim via ClaimMD_ID.
+        """
+        from pathlib import Path
+
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning("Attachment file not found", path=file_path)
+            return False
+
+        if DRY_RUN:
+            logger.info(
+                "DRY_RUN: Would upload attachment",
+                claim_id=claim_id,
+                file=file_path,
+            )
+            return True
+
+        fname = filename or path.name
+        file_data = path.read_bytes()
+
+        try:
+            import aiohttp
+
+            form = aiohttp.FormData()
+            form.add_field("AccountKey", self.key)
+            form.add_field("ClaimMD_ID", claim_id)
+            form.add_field(
+                "File", file_data,
+                filename=fname,
+                content_type="application/pdf",
+            )
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base}upload/",
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    text = await resp.text()
+                    success = "attachments pending" in text.lower() or resp.status == 200
+                    if success:
+                        logger.info(
+                            "Attachment uploaded",
+                            claim_id=claim_id,
+                            file=fname,
+                        )
+                    else:
+                        logger.warning(
+                            "Attachment upload may have failed",
+                            claim_id=claim_id,
+                            response=text[:200],
+                        )
+                    return success
+        except Exception as exc:
+            logger.error(
+                "Attachment upload failed",
+                claim_id=claim_id,
+                error=str(exc)[:200],
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Archive old claims
     # ------------------------------------------------------------------
 
