@@ -32,6 +32,7 @@ _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 DONE_STATUSES = {"complete", "closed", "done", "resolved"}
+TASK_DUE_DAYS = 3  # Tasks are due 3 days after creation/reopen
 
 # Response instruction block appended to auth-related ClickUp tasks
 RESPONSE_INSTRUCTIONS = {
@@ -201,37 +202,57 @@ async def reopen_existing_task(
     pcn: str,
     new_info: str,
 ) -> bool:
-    """Add a comment to an existing ClickUp task and bump encounter count."""
+    """Reopen/comment on an existing ClickUp task and bump encounter count.
+
+    If the task was closed, reopens it and sets due date to 3 business
+    days from now. If still open, just adds the comment.
+    """
     if not CLICKUP_API_TOKEN:
         return False
 
-    # Add comment to ClickUp
+    headers = {
+        "Authorization": CLICKUP_API_TOKEN,
+        "Content-Type": "application/json",
+    }
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{CLICKUP_BASE}/task/{task_id}/comment",
-                json={
-                    "comment_text": (
-                        f"Automation re-encountered this claim on "
-                        f"{datetime.now().strftime('%m/%d/%Y')}.\n\n"
-                        f"{new_info}"
-                    ),
-                    "notify_all": False,
-                },
-                headers={
-                    "Authorization": CLICKUP_API_TOKEN,
-                    "Content-Type": "application/json",
-                },
+            # Check current task status
+            async with session.get(
+                f"{CLICKUP_BASE}/task/{task_id}",
+                headers=headers,
             ) as resp:
-                if resp.status not in (200, 201):
-                    logger.warning(
-                        "Failed to comment on ClickUp task",
-                        task_id=task_id,
-                        status=resp.status,
+                if resp.status == 200:
+                    task_data = await resp.json()
+                    task_status = (
+                        task_data.get("status", {}).get("status", "")
+                        .lower().strip()
                     )
-                    return False
+                    # If closed, reopen it with new 3-day due date
+                    if task_status in DONE_STATUSES:
+                        new_due = _due_date_ms_from_now(TASK_DUE_DAYS)
+                        await _update_task(
+                            session, headers, task_id,
+                            {
+                                "status": "to do",
+                                "due_date": new_due,
+                                "due_date_time": True,
+                            },
+                        )
+                        logger.info(
+                            "Reopened closed ClickUp task",
+                            task_id=task_id,
+                        )
+
+            # Add comment
+            await _add_comment(
+                session, headers, task_id,
+                f"Automation re-encountered this claim on "
+                f"{datetime.now().strftime('%m/%d/%Y')}.\n\n"
+                f"{new_info}",
+            )
     except Exception as exc:
-        logger.warning("ClickUp comment failed", error=str(exc)[:100])
+        logger.warning("ClickUp reopen/comment failed", error=str(exc)[:100])
         return False
 
     # Update encounter count in DB
@@ -263,12 +284,17 @@ async def reopen_existing_task(
 async def poll_claim_feedback() -> dict:
     """Poll ClickUp for completed auth-related tasks.
 
-    Only processes tasks where status is 'pending_staff' in our DB
-    and the ClickUp task status is complete/closed.
+    Checks tasks where status is 'pending_staff' in our DB:
+    - If ClickUp task is closed WITH actionable info → mark as staff_responded
+    - If ClickUp task is closed WITHOUT info → reopen task, keep original due date
+    - If ClickUp task is open but missing/wrong due date → set to 3 days out
 
-    Returns summary dict of what was found.
+    Returns summary dict.
     """
-    result = {"polled": 0, "responded": 0, "still_pending": 0, "errors": 0}
+    result = {
+        "polled": 0, "responded": 0, "reopened": 0,
+        "due_date_fixed": 0, "still_pending": 0, "errors": 0,
+    }
 
     if not CLICKUP_API_TOKEN:
         return result
@@ -290,7 +316,7 @@ async def poll_claim_feedback() -> dict:
         for row in pending:
             task_id = row["task_id"]
             try:
-                # Get task status
+                # Get task details
                 async with session.get(
                     f"{CLICKUP_BASE}/task/{task_id}",
                     headers=headers,
@@ -304,12 +330,31 @@ async def poll_claim_feedback() -> dict:
                     task_data.get("status", {}).get("status", "")
                     .lower().strip()
                 )
+                due_date_ms = task_data.get("due_date")
 
+                # --------------------------------------------------
+                # Task still open — check due date
+                # --------------------------------------------------
                 if task_status not in DONE_STATUSES:
                     result["still_pending"] += 1
+
+                    # Ensure due date is set (3 days from creation)
+                    if not due_date_ms:
+                        new_due = _due_date_ms_from_now(TASK_DUE_DAYS)
+                        await _update_task(
+                            session, headers, task_id,
+                            {"due_date": new_due, "due_date_time": True},
+                        )
+                        result["due_date_fixed"] += 1
+                        logger.info(
+                            "Set missing due date on task",
+                            task_id=task_id,
+                        )
                     continue
 
-                # Task is complete — get comments
+                # --------------------------------------------------
+                # Task is closed — get comments and check for info
+                # --------------------------------------------------
                 async with session.get(
                     f"{CLICKUP_BASE}/task/{task_id}/comment",
                     headers=headers,
@@ -320,30 +365,45 @@ async def poll_claim_feedback() -> dict:
                     comments_data = await resp.json()
 
                 comments = comments_data.get("comments", [])
-
-                # Filter to non-automation comments (staff responses)
-                staff_comments = []
-                for c in comments:
-                    poster = c.get("user", {}).get("username", "")
-                    text = ""
-                    for part in c.get("comment", []):
-                        if part.get("type") == "text":
-                            text += part.get("text", "")
-                    if text.strip() and "AUTO" not in poster.upper():
-                        staff_comments.append({
-                            "text": text.strip(),
-                            "user": poster,
-                            "date": c.get("date", ""),
-                        })
-
-                # Parse the staff response
+                staff_comments = _extract_staff_comments(comments)
                 all_text = "\n".join(sc["text"] for sc in staff_comments)
                 parsed = parse_staff_response(all_text)
+
+                has_actionable_info = bool(
+                    parsed.get("action")
+                    or parsed.get("auth")
+                    or parsed.get("entity")
+                )
+
+                # --------------------------------------------------
+                # Closed WITHOUT info → reopen, keep original due date
+                # --------------------------------------------------
+                if not has_actionable_info:
+                    logger.info(
+                        "Task closed without actionable info — reopening",
+                        task_id=task_id,
+                        claim_id=row["claim_id"],
+                    )
+                    # Reopen the task (set to "open" or "to do" status)
+                    await _reopen_task(session, headers, task_id)
+                    # Add comment explaining why it was reopened
+                    await _add_comment(
+                        session, headers, task_id,
+                        "This task was closed without the required "
+                        "information. Please provide the needed details "
+                        "and then mark as Complete.\n\n"
+                        "Required: Auth #, Entity (KJLN/NHCS/Mary's Home), "
+                        "and Action (resubmit/write off/rebill/appeal)."
+                    )
+                    result["reopened"] += 1
+                    continue
+
+                # --------------------------------------------------
+                # Closed WITH info → capture response
+                # --------------------------------------------------
                 responded_by = (
                     staff_comments[-1]["user"] if staff_comments else ""
                 )
-
-                # Update DB
                 now = datetime.now().isoformat()
                 conn = sqlite3.connect(str(_DB_PATH))
                 conn.execute(
@@ -390,6 +450,85 @@ async def poll_claim_feedback() -> dict:
                 )
 
     return result
+
+
+def _extract_staff_comments(comments: list) -> list[dict]:
+    """Extract non-automation comments from ClickUp comment list."""
+    staff = []
+    for c in comments:
+        poster = c.get("user", {}).get("username", "")
+        text = ""
+        for part in c.get("comment", []):
+            if part.get("type") == "text":
+                text += part.get("text", "")
+        if text.strip() and "AUTO" not in poster.upper():
+            staff.append({
+                "text": text.strip(),
+                "user": poster,
+                "date": c.get("date", ""),
+            })
+    return staff
+
+
+def _due_date_ms_from_now(days: int) -> int:
+    """Return a ClickUp timestamp (Unix ms) for N business days from now."""
+    from datetime import timedelta
+    d = datetime.now()
+    added = 0
+    while added < days:
+        d += timedelta(days=1)
+        if d.weekday() < 5:  # Mon-Fri
+            added += 1
+    # Set to 5 PM
+    d = d.replace(hour=17, minute=0, second=0, microsecond=0)
+    return int(d.timestamp() * 1000)
+
+
+async def _update_task(
+    session: aiohttp.ClientSession,
+    headers: dict,
+    task_id: str,
+    updates: dict,
+) -> bool:
+    """Update a ClickUp task's fields."""
+    try:
+        async with session.put(
+            f"{CLICKUP_BASE}/task/{task_id}",
+            json=updates,
+            headers=headers,
+        ) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+async def _reopen_task(
+    session: aiohttp.ClientSession,
+    headers: dict,
+    task_id: str,
+) -> bool:
+    """Reopen a closed ClickUp task by setting status to 'to do'."""
+    return await _update_task(
+        session, headers, task_id, {"status": "to do"},
+    )
+
+
+async def _add_comment(
+    session: aiohttp.ClientSession,
+    headers: dict,
+    task_id: str,
+    text: str,
+) -> bool:
+    """Add a comment to a ClickUp task."""
+    try:
+        async with session.post(
+            f"{CLICKUP_BASE}/task/{task_id}/comment",
+            json={"comment_text": text, "notify_all": True},
+            headers=headers,
+        ) as resp:
+            return resp.status in (200, 201)
+    except Exception:
+        return False
 
 
 def mark_task_processed(task_id: str) -> None:
