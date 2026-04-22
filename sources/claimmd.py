@@ -712,31 +712,204 @@ class ClaimMDSession(BrowserSession):
             return False
 
 
-async def post_claim_note(claim_id: str, note_text: str) -> bool:
-    """Standalone function to write and save a note on a Claim.MD claim.
+async def post_claim_note(
+    claim_id: str, note_text: str, pcn: str = "",
+) -> bool:
+    """Write and save a note on a Claim.MD claim via browser.
 
-    Opens a browser session, navigates to the claim, writes the note,
-    and clicks 'Add Note / Reminder'.
+    Uses persistent Chrome profile with anti-automation detection to
+    get the full Claim.MD interface (Search, notes, etc.).
+
+    Flow: Search by PCN → open claim → write note → click Add Note/Reminder.
     """
-    from config.models import Claim, MCO, Program, ClaimStatus
+    from pathlib import Path
+    from datetime import date as _date
+    from playwright.async_api import async_playwright
 
-    claim = Claim(
-        claim_id=claim_id,
-        client_name="",
-        client_id="",
-        dos=None,
-        mco=MCO.UNKNOWN,
-        program=Program.UNKNOWN,
-        billed_amount=0,
-        status=ClaimStatus.DENIED,
-    )
-    claim.claimmd_url = f"https://www.claim.md/monitor.plx?l=claim&id={claim_id}"
+    _log = get_logger("claimmd_note")
 
+    if not pcn:
+        _log.warning("PCN required for note posting", claim_id=claim_id)
+        return False
+
+    user_data = Path("/tmp/claimmd_chrome_profile")
+    user_data.mkdir(exist_ok=True)
+    session_dir = Path("sessions")
+    session_dir.mkdir(exist_ok=True)
+    session_file = session_dir / f"claimmd_{_date.today().isoformat()}.json"
+
+    pw = None
+    context = None
     try:
-        async with ClaimMDSession(headless=True) as session:
-            return await session.write_and_save_note(claim, note_text)
+        pw = await async_playwright().start()
+
+        # Use persistent context with anti-detection
+        context = await pw.chromium.launch_persistent_context(
+            str(user_data),
+            headless=True,
+            viewport={"width": 1920, "height": 1080},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+            ],
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            ignore_default_args=["--enable-automation"],
+        )
+
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
+
+        # Navigate to Claim.MD
+        await page.goto(
+            "https://www.claim.md/login", wait_until="domcontentloaded", timeout=20000,
+        )
+        await asyncio.sleep(3)
+
+        # Check if already logged in (persistent profile may have session)
+        logged_in = False
+        search_link = await page.query_selector("a:has-text('Search')")
+        logout_link = await page.query_selector("a:has-text('LOGOUT')")
+        if search_link or logout_link:
+            logged_in = True
+            _log.info("Claim.MD session active from persistent profile")
+
+        if not logged_in:
+            # Try auto-login (may fail on CAPTCHA)
+            try:
+                await page.fill("input[name='userlogin']", os.getenv("CLAIMMD_USERNAME", ""))
+                await page.fill("input[name='password']", os.getenv("CLAIMMD_PASSWORD", ""))
+                await page.click("input[type='submit']")
+                await asyncio.sleep(5)
+                search_link = await page.query_selector("a:has-text('Search')")
+                if search_link:
+                    logged_in = True
+            except Exception:
+                pass
+
+        if not logged_in:
+            _log.warning("Claim.MD login failed — CAPTCHA may be required")
+            await context.close()
+            await pw.stop()
+            return False
+
+        # Click "Search" in sidebar
+        search_link = await page.query_selector("a:has-text('Search')")
+        if not search_link:
+            _log.warning("Search link not found in sidebar")
+            await context.close()
+            await pw.stop()
+            return False
+
+        await search_link.click()
+        await asyncio.sleep(2)
+
+        # Fill "Acct # / PCN" field (first input in Search Claims dialog)
+        # The dialog has fields in order: Acct#/PCN, Policy#, Patient Last Name, etc.
+        pcn_input = await page.query_selector(
+            "input[name*='pcn'], input[name*='acct'], "
+            "input[name*='account'], input[name*='search_pcn']"
+        )
+        if not pcn_input:
+            # Fallback: first visible input in the search dialog
+            dialog_inputs = await page.query_selector_all(
+                ".search-dialog input[type='text'], "
+                "#searchDialog input[type='text'], "
+                "div:has-text('Primary Search') input[type='text']"
+            )
+            if dialog_inputs:
+                pcn_input = dialog_inputs[0]
+
+        if not pcn_input:
+            # Last resort: find by position — first text input after "Acct # / PCN" text
+            all_inputs = await page.query_selector_all("input[type='text']")
+            for inp in all_inputs:
+                if await inp.is_visible():
+                    pcn_input = inp
+                    break
+
+        if not pcn_input:
+            _log.warning("PCN search field not found")
+            await page.screenshot(path="logs/screenshots/claimmd_no_pcn_field.png")
+            await context.close()
+            await pw.stop()
+            return False
+
+        await pcn_input.fill(pcn)
+        await asyncio.sleep(0.5)
+
+        # Click Search button in dialog
+        search_btn = await page.query_selector(
+            "input[value='Search'], button:has-text('Search')"
+        )
+        if search_btn:
+            await search_btn.click()
+            await asyncio.sleep(3)
+
+        # Click on claim row in results
+        claim_row = await page.query_selector(f"td:has-text('{pcn}')")
+        if claim_row:
+            await claim_row.click()
+            await asyncio.sleep(3)
+        else:
+            # Try clicking first row link
+            first_link = await page.query_selector("table a, tr a")
+            if first_link:
+                await first_link.click()
+                await asyncio.sleep(3)
+
+        # Now on claim detail — find notes textarea
+        notes_field = await page.query_selector(
+            "textarea#notes, textarea[name='notes'], "
+            "textarea[name*='note'], textarea"
+        )
+        if not notes_field or not await notes_field.is_visible():
+            _log.warning("Notes textarea not found/visible on claim page")
+            await page.screenshot(path="logs/screenshots/claimmd_no_notes.png")
+            await context.close()
+            await pw.stop()
+            return False
+
+        # Write note
+        existing = await notes_field.input_value()
+        new_text = f"{existing}\n{note_text}".strip() if existing else note_text
+        await notes_field.fill(new_text)
+
+        # Click "Add Note / Reminder"
+        add_btn = await page.query_selector(
+            "input[value*='Add Note'], input[value*='Reminder'], "
+            "button:has-text('Add Note'), a:has-text('Add Note')"
+        )
+        if add_btn:
+            await add_btn.click()
+            await asyncio.sleep(3)
+            _log.info("Note saved via browser", claim_id=claim_id, pcn=pcn)
+            await context.close()
+            await pw.stop()
+            return True
+        else:
+            _log.warning("Add Note/Reminder button not found")
+            await page.screenshot(path="logs/screenshots/claimmd_no_add_note_btn.png")
+            await context.close()
+            await pw.stop()
+            return False
+
     except Exception as exc:
-        logger.warning("post_claim_note failed", claim_id=claim_id, error=str(exc)[:100])
+        _log.warning("post_claim_note failed", claim_id=claim_id, error=str(exc)[:150])
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
         return False
 
 
