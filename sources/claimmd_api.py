@@ -576,7 +576,14 @@ class ClaimMDAPI:
     # ------------------------------------------------------------------
 
     async def submit_appeal(self, claim_id: str, appeal_data: dict) -> bool:
-        """Submit a claim appeal via the API."""
+        """Submit a claim appeal via the API.
+
+        NOTE: Claim.MD's `appeal` endpoint rejects all ID formats we've
+        tried (ClaimMD_ID, ClaimID, Remote_ClaimID, PCN) with error 1210
+        "Valid claim ID or remote claim ID required". The endpoint may
+        not support appeal submission directly — appeals may need to be
+        submitted via the web portal.
+        """
         if DRY_RUN:
             logger.info("DRY_RUN: Would submit appeal", claim_id=claim_id)
             return True
@@ -584,6 +591,19 @@ class ClaimMDAPI:
         data = {"ClaimMD_ID": claim_id}
         data.update(appeal_data)
         result = await self._post("appeal", data)
+
+        # Check for API error — previously returned True even on error
+        if isinstance(result, dict) and result.get("error"):
+            err = result["error"]
+            logger.warning(
+                "Appeal API error",
+                claim_id=claim_id,
+                error_code=err.get("error_code"),
+                error_mesg=err.get("error_mesg", "")[:200],
+            )
+            return False
+
+        logger.info("Appeal submitted via API", claim_id=claim_id)
         return bool(result)
 
     # ------------------------------------------------------------------
