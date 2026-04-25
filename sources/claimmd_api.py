@@ -814,13 +814,11 @@ class ClaimMDAPI:
                     }
 
                 if "MAILED PAPER APPEAL" in text or "appealStatus" in text:
-                    # Extract contextid (appeal ID) from the response
-                    appeal_id_match = re.search(
-                        r"contextid=([0-9]+)",
-                        text,
-                    )
+                    # Extract all contextids — the response includes prior
+                    # appeals too. The newest appeal has the highest ID.
+                    all_ids = re.findall(r"contextid=([0-9]+)", text)
                     appeal_id = (
-                        appeal_id_match.group(1) if appeal_id_match else ""
+                        str(max(int(i) for i in all_ids)) if all_ids else ""
                     )
                     logger.info(
                         "Appeal submitted",
