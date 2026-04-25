@@ -25,6 +25,40 @@ from logging_utils.logger import get_logger
 
 logger = get_logger("claimmd_api")
 
+
+def _make_signature_data_url(text: str = "LCI Billing") -> str:
+    """Generate a signature image as a data URL.
+
+    Tries PIL for a cursive-styled signature; falls back to a 1x1
+    transparent PNG if PIL isn't available.
+    """
+    import base64
+    import io
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.new("RGBA", (300, 80), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype(
+                "/System/Library/Fonts/Supplemental/Apple Chancery.ttf",
+                36,
+            )
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+        draw.text((10, 20), text, fill=(0, 0, 50, 255), font=font)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except ImportError:
+        # Fallback: 1x1 transparent PNG
+        b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5"
+            "+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        )
+    return f"data:image/png;base64,{b64}"
+
 # Payer ID → MCO mapping (from Claim.MD payer list)
 # Complete payer ID → MCO mapping (from Claim.MD payer list + claim data analysis)
 PAYER_MCO_MAP = {
@@ -627,6 +661,192 @@ class ClaimMDAPI:
 
         logger.warning("Appeal response missing URL", claim_id=claim_id)
         return ""
+
+    async def complete_and_submit_appeal(
+        self,
+        claim_id: str,
+        reason: str,
+        provider_address: str,
+        contact_name: str = "LCI Billing Department",
+        contact_phone: str = "7572134272",
+        contact_email: str = "billing@lifeconsultantsinc.org",
+        method: str = "mail",
+        signature_text: str = "LCI Billing",
+    ) -> dict:
+        """Generate, fill, and submit an appeal end-to-end.
+
+        Returns dict with: {success, appeal_id, status, mailed_to, error}.
+
+        Flow:
+          1. POST /services/appeal/ with claimid → get appeal form URL
+          2. GET form URL to establish session
+          3. POST appealform={form_id} to select the appeal form
+          4. GET ?loadform=1&... to fetch the form field definition
+          5. Fill in required fields (contact info, reason, signature)
+          6. POST the form data with appeal_method, src/dest addresses
+
+        For "mail" method: submits via 1st Class USPS to the payer.
+        Service fees may apply per Claim.MD pricing.
+
+        reason: appeal reason text (single line, ~50-70 chars max — the
+                form field is fixed-width on the PDF and overflow rejects)
+        provider_address: FROM address, e.g.
+                "Mary's Home Inc.\\n4020 PORTSMOUTH BLVD\\nCHESAPEAKE, VA 23321"
+        method: "mail", "fax", "email", or "electronic" (per payer support)
+        """
+        import aiohttp
+        import base64
+        import io
+        import re
+
+        if DRY_RUN:
+            logger.info("DRY_RUN: Would complete appeal", claim_id=claim_id)
+            return {"success": True, "appeal_id": "dry-run", "status": "DRY_RUN"}
+
+        # Step 1: Generate appeal URL
+        url = await self.submit_appeal(claim_id)
+        if not url:
+            return {"success": False, "error": "Could not generate appeal URL"}
+
+        # Generate signature image (data URL)
+        sig_data_url = _make_signature_data_url(signature_text)
+
+        jar = aiohttp.CookieJar(unsafe=True)
+        try:
+            async with aiohttp.ClientSession(cookie_jar=jar) as session:
+                # Step 2: Establish session
+                async with session.get(url) as resp:
+                    html = await resp.text()
+                    if resp.status != 200:
+                        return {
+                            "success": False,
+                            "error": f"GET appeal URL failed: {resp.status}",
+                        }
+
+                # Find available appeal form ID for this payer
+                form_match = re.search(
+                    r'<option[^>]*value=["\']([0-9]+)["\']',
+                    html,
+                )
+                if not form_match:
+                    return {
+                        "success": False,
+                        "error": "No appeal form available for this payer",
+                    }
+                form_id = form_match.group(1)
+
+                # Step 3: Select the appeal form
+                sel = aiohttp.FormData()
+                sel.add_field("appealform", form_id)
+                async with session.post(url, data=sel) as resp:
+                    await resp.text()
+
+                # Step 4: Load form field definition
+                load_url = (
+                    f"{url}?loadform=1&context=appeal"
+                    f"&contextid=0&linkid={claim_id}"
+                )
+                async with session.get(load_url) as resp:
+                    form_def = await resp.json(content_type=None)
+
+                fields = form_def.get("form", [])
+                settings = form_def.get("settings", {})
+                payer_address = (
+                    settings.get("mail_addr", "").split("|")[-1].strip()
+                )
+
+                # Step 5: Build field values
+                field_values = {}
+                signature_idx = None
+                for i, f in enumerate(fields):
+                    name = f.get("fullname", "")
+                    existing = f.get("value", "")
+                    fieldtype = f.get("fieldtype", "")
+
+                    if fieldtype == "/Sig" or (not name and i == len(fields) - 1):
+                        signature_idx = i
+                        continue
+                    if name == "contact_name" and not existing:
+                        field_values[i] = contact_name
+                    elif name == "contact_phone" and not existing:
+                        field_values[i] = contact_phone
+                    elif name == "contact_email" and not existing:
+                        field_values[i] = contact_email
+                    elif name == "reason" and not existing:
+                        field_values[i] = reason
+                    elif existing:
+                        field_values[i] = existing
+
+                if signature_idx is not None:
+                    field_values[signature_idx] = sig_data_url
+
+                # Step 6: Submit the form
+                submit_data = aiohttp.FormData()
+                submit_data.add_field("context", "appeal")
+                submit_data.add_field("contextid", "0")
+                submit_data.add_field("linkid", claim_id)
+                submit_data.add_field("save", "1")
+                submit_data.add_field("save_signature", sig_data_url)
+                submit_data.add_field("appeal_method", method)
+                submit_data.add_field("appeal_dest", payer_address)
+                submit_data.add_field("appeal_src", provider_address)
+                for idx, val in field_values.items():
+                    submit_data.add_field(f"field_{idx}", str(val))
+
+                async with session.post(url, data=submit_data) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        return {
+                            "success": False,
+                            "error": f"Submit failed: {resp.status}",
+                        }
+
+                # Parse the response for success or error
+                if "notification.show" in text and "error" in text:
+                    err_match = re.search(
+                        r"notification\.show\(['\"](.+?)['\"]",
+                        text,
+                    )
+                    err_msg = err_match.group(1) if err_match else "Unknown error"
+                    return {
+                        "success": False,
+                        "error": err_msg[:300],
+                    }
+
+                if "MAILED PAPER APPEAL" in text or "appealStatus" in text:
+                    # Extract contextid (appeal ID) from the response
+                    appeal_id_match = re.search(
+                        r"contextid=([0-9]+)",
+                        text,
+                    )
+                    appeal_id = (
+                        appeal_id_match.group(1) if appeal_id_match else ""
+                    )
+                    logger.info(
+                        "Appeal submitted",
+                        claim_id=claim_id,
+                        appeal_id=appeal_id,
+                        method=method,
+                    )
+                    return {
+                        "success": True,
+                        "appeal_id": appeal_id,
+                        "status": "MAILED PAPER APPEAL",
+                        "mailed_to": payer_address,
+                    }
+
+                return {
+                    "success": False,
+                    "error": "Unexpected response",
+                    "response_preview": text[:200],
+                }
+        except Exception as exc:
+            logger.warning(
+                "Appeal completion failed",
+                claim_id=claim_id,
+                error=str(exc)[:200],
+            )
+            return {"success": False, "error": str(exc)[:200]}
 
     # ------------------------------------------------------------------
     # Attach supporting documentation
