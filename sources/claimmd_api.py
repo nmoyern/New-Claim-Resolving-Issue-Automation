@@ -723,17 +723,30 @@ class ClaimMDAPI:
                             "error": f"GET appeal URL failed: {resp.status}",
                         }
 
-                # Find available appeal form ID for this payer
-                form_match = re.search(
-                    r'<option[^>]*value=["\']([0-9]+)["\']',
-                    html,
+                # Find the appealform select and extract its options.
+                # Form value may be empty string (Anthem) or numeric ID
+                # (Humana). Both patterns point to the same underlying
+                # Generic Appeal Form (pdfid 29041).
+                select_match = re.search(
+                    r"<select[^>]*name=[\"']appealform[\"'][^>]*>"
+                    r"(.*?)</select>",
+                    html, re.DOTALL,
                 )
-                if not form_match:
+                if not select_match:
                     return {
                         "success": False,
-                        "error": "No appeal form available for this payer",
+                        "error": "No appealform select on page",
                     }
-                form_id = form_match.group(1)
+                first_option = re.search(
+                    r"<option[^>]*value=[\"']([^\"']*)[\"']",
+                    select_match.group(1),
+                )
+                if not first_option:
+                    return {
+                        "success": False,
+                        "error": "No appeal form options available",
+                    }
+                form_id = first_option.group(1)  # May be "" or numeric
 
                 # Step 3: Select the appeal form
                 sel = aiohttp.FormData()
@@ -742,9 +755,22 @@ class ClaimMDAPI:
                     await resp.text()
 
                 # Step 4: Load form field definition
+                # Per generateAppeal JS: when form_id is empty (Anthem),
+                # linkid must be extended with include flags:
+                # "{claim_id},include_claim,include_era,include_history"
+                # Defaults: include_claim=1, include_era=1, include_history=0
+                if form_id:
+                    # Numeric form (Humana) — contextid is form ID
+                    linkid_param = claim_id
+                    contextid_param = "0"
+                else:
+                    # Empty form value (Anthem, others) — extended linkid
+                    linkid_param = f"{claim_id},1,1,0"
+                    contextid_param = "0"
+
                 load_url = (
                     f"{url}?loadform=1&context=appeal"
-                    f"&contextid=0&linkid={claim_id}"
+                    f"&contextid={contextid_param}&linkid={linkid_param}"
                 )
                 async with session.get(load_url) as resp:
                     form_def = await resp.json(content_type=None)
@@ -781,10 +807,11 @@ class ClaimMDAPI:
                     field_values[signature_idx] = sig_data_url
 
                 # Step 6: Submit the form
+                # Use the same linkid/contextid we used to load the form
                 submit_data = aiohttp.FormData()
                 submit_data.add_field("context", "appeal")
-                submit_data.add_field("contextid", "0")
-                submit_data.add_field("linkid", claim_id)
+                submit_data.add_field("contextid", contextid_param)
+                submit_data.add_field("linkid", linkid_param)
                 submit_data.add_field("save", "1")
                 submit_data.add_field("save_signature", sig_data_url)
                 submit_data.add_field("appeal_method", method)
