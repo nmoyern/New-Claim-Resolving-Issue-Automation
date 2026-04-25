@@ -1646,11 +1646,11 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
         )
 
         recon_success = False
+        appeal_url = ""
         if api.key:
             from notes.formatter import format_note
-            recon_success = await api.submit_appeal(claim.claim_id, {
-                "AppealType": "reconsideration",
-            })
+            appeal_url = await api.submit_appeal(claim.claim_id)
+            recon_success = bool(appeal_url)
             await api.add_claim_note(
                 claim.claim_id, format_note(recon_note),
             )
@@ -1658,7 +1658,7 @@ async def handle_mco_auth_check(claim: Claim) -> ResolutionResult:
                 log_autonomous_correction(
                     claim.claim_id,
                     "reconsideration_submitted",
-                    recon_note,
+                    recon_note + f" Appeal form: {appeal_url}",
                 )
 
         # ClickUp notification for recon submission
@@ -1819,12 +1819,16 @@ async def _process_staff_feedback(
         )
 
     if parsed_action == "appeal":
+        appeal_url = ""
+        if api.key:
+            appeal_url = await api.submit_appeal(claim.claim_id)
         note = (
-            f"Appeal submitted per staff ({responded_by}) via ClickUp {task_id}. "
-            f"#AUTO #{date.today().strftime('%m/%d/%y')}"
+            f"Appeal form generated per staff ({responded_by}) via "
+            f"ClickUp {task_id}. "
+            + (f"Appeal form: {appeal_url}. " if appeal_url else "")
+            + f"#AUTO #{date.today().strftime('%m/%d/%y')}"
         )
         if api.key:
-            await api.submit_appeal(claim.claim_id, {"AppealType": "appeal"})
             await api.add_claim_note(claim.claim_id, note)
 
             # Attach DMAS license if provider eligibility issue
@@ -2399,12 +2403,13 @@ async def handle_reconsideration(claim: Claim) -> ResolutionResult:
     # Use API for appeal submission if available
     api = ClaimMDAPI()
     if api.key:
-        success = await api.submit_appeal(claim.claim_id, {
-            "AppealType": "reconsideration",
-            "ReconReason": recon_letter_text,
-        })
+        appeal_url = await api.submit_appeal(claim.claim_id)
+        success = bool(appeal_url)
         if success:
-            note = note_reconsideration_submitted(claim.mco.value)
+            note = (
+                note_reconsideration_submitted(claim.mco.value)
+                + f" Appeal form: {appeal_url}"
+            )
             await api.add_claim_note(claim.claim_id, note)
     else:
         async with ClaimMDSession() as claimmd:

@@ -575,24 +575,32 @@ class ClaimMDAPI:
     # Claim appeal
     # ------------------------------------------------------------------
 
-    async def submit_appeal(self, claim_id: str, appeal_data: dict) -> bool:
-        """Submit a claim appeal via the API.
+    async def submit_appeal(
+        self, claim_id: str, appeal_data: dict | None = None,
+    ) -> str:
+        """Generate a Claim.MD appeal form URL via the API.
 
-        NOTE: Claim.MD's `appeal` endpoint rejects all ID formats we've
-        tried (ClaimMD_ID, ClaimID, Remote_ClaimID, PCN) with error 1210
-        "Valid claim ID or remote claim ID required". The endpoint may
-        not support appeal submission directly — appeals may need to be
-        submitted via the web portal.
+        Returns the appeal form URL on success, empty string on error.
+        The URL loads an online form where the appeal can be completed
+        and submitted (electronically, fax, mail, or download).
+
+        Field is lowercase `claimid` — the Claim.MD internal claim ID
+        (what we've been calling ClaimMD_ID elsewhere). The endpoint
+        also accepts `remote_claimid` (REF*D9 from original submission)
+        as an alternative.
+
+        Optional contact fields (contact_name, contact_email, etc.) can
+        be passed via appeal_data to pre-populate the appeal form.
         """
         if DRY_RUN:
             logger.info("DRY_RUN: Would submit appeal", claim_id=claim_id)
-            return True
+            return "dry-run-appeal-url"
 
-        data = {"ClaimMD_ID": claim_id}
-        data.update(appeal_data)
+        data = {"claimid": claim_id}
+        if appeal_data:
+            data.update(appeal_data)
         result = await self._post("appeal", data)
 
-        # Check for API error — previously returned True even on error
         if isinstance(result, dict) and result.get("error"):
             err = result["error"]
             logger.warning(
@@ -601,10 +609,24 @@ class ClaimMDAPI:
                 error_code=err.get("error_code"),
                 error_mesg=err.get("error_mesg", "")[:200],
             )
-            return False
+            return ""
 
-        logger.info("Appeal submitted via API", claim_id=claim_id)
-        return bool(result)
+        # Success response: {"link": [{"url": "..."}], "success": 1}
+        links = result.get("link", []) if isinstance(result, dict) else []
+        if isinstance(links, dict):
+            links = [links]
+        if links and isinstance(links[0], dict):
+            url = links[0].get("url", "")
+            if url:
+                logger.info(
+                    "Appeal form URL generated",
+                    claim_id=claim_id,
+                    url=url,
+                )
+                return url
+
+        logger.warning("Appeal response missing URL", claim_id=claim_id)
+        return ""
 
     # ------------------------------------------------------------------
     # Attach supporting documentation
