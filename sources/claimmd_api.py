@@ -667,11 +667,11 @@ class ClaimMDAPI:
         claim_id: str,
         reason: str,
         provider_address: str,
-        contact_name: str = "LCI Billing Department",
-        contact_phone: str = "7572134272",
-        contact_email: str = "billing@lifeconsultantsinc.org",
+        contact_name: str = "Desiree Whitehead",
+        contact_phone: str = "7575298844",
+        contact_email: str = "admin@lifeconsultantsinc.org",
         method: str = "mail",
-        signature_text: str = "LCI Billing",
+        signature_text: str = "Desiree Whitehead",
     ) -> dict:
         """Generate, fill, and submit an appeal end-to-end.
 
